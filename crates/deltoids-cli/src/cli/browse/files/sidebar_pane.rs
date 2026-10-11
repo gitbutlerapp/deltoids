@@ -24,7 +24,7 @@ use super::model::{Model, body_deltas};
 /// `[1]` badge and the label use the bold accent; the `─` rules use
 /// `rule_color`, the pane's own border colour, so the title stays
 /// continuous with the border (accent when focused, plain otherwise).
-pub(crate) fn sidebar_title(rule_color: Color, theme: &Theme) -> Line<'static> {
+pub(crate) fn sidebar_title(rule_color: Color, label: &str, theme: &Theme) -> Line<'static> {
     let rule = Style::default().fg(rule_color);
     let accent = Style::default()
         .fg(rgb_to_color(theme.border_active))
@@ -33,7 +33,7 @@ pub(crate) fn sidebar_title(rule_color: Color, theme: &Theme) -> Line<'static> {
         Span::styled("─", rule),
         Span::styled("[1]", accent),
         Span::styled("─", rule),
-        Span::styled("Files", accent),
+        Span::styled(label.to_string(), accent),
         Span::styled("─", rule),
     ])
 }
@@ -99,6 +99,7 @@ pub(super) fn draw_sidebar(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     sidebar: &Sidebar,
+    label: &str,
     footer: Option<Line<'static>>,
     focused: bool,
     theme: &Theme,
@@ -139,7 +140,7 @@ pub(super) fn draw_sidebar(
     }
 
     let color = pane_border_color(focused, theme);
-    let block = pane_block_with_title_line(sidebar_title(color, theme), color, footer);
+    let block = pane_block_with_title_line(sidebar_title(color, label, theme), color, footer);
     frame.render_widget(Paragraph::new(visible).block(block), area);
 
     render_pane_scrollbar(
@@ -278,7 +279,17 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(width, 6);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| draw_sidebar(frame, frame.area(), sidebar, None, true, &Theme::default()))
+            .draw(|frame| {
+                draw_sidebar(
+                    frame,
+                    frame.area(),
+                    sidebar,
+                    "Files",
+                    None,
+                    true,
+                    &Theme::default(),
+                )
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         (1..5)
@@ -387,7 +398,7 @@ mod tests {
     fn sidebar_title_reads_files_with_accent_label_and_border_rules() {
         let theme = Theme::default();
         let rule_color = rgb_to_color(theme.border);
-        let line = sidebar_title(rule_color, &theme);
+        let line = sidebar_title(rule_color, "Files", &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "─[1]─Files─");
         let files = line.spans.iter().find(|s| s.content == "Files").unwrap();

@@ -38,6 +38,8 @@ pub(super) const HELP_KEYS: &[(&str, &str)] = &[
     ("d", "discard (sidebar) / delete comment (diff)"),
     ("y", "copy comments"),
     ("D", "clear all comments"),
+    ("b", "browse branches and commits"),
+    ("Enter / Esc", "open / go back (branches, commits)"),
     ("< / >", "narrow / widen sidebar"),
     ("\\", "cycle diff layout (grouped \u{2194} interleaved)"),
     ("t", "pick syntax theme"),

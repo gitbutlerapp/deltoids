@@ -264,6 +264,12 @@ pub(super) fn build_model(
     finish_model(GitDiff::parse(input), repo, stages)
 }
 
+/// The model of one commit's patch: every side resolves from the
+/// object database, and there is no staging.
+pub(super) fn build_commit_model(patch: &str, repo: &git::Repo) -> Result<Model, String> {
+    finish_model(GitDiff::parse(patch), Some(repo), HashMap::new())
+}
+
 pub(super) fn build_working_model(
     snapshot: &git::WorkingTreeSnapshot,
     repo: &git::Repo,

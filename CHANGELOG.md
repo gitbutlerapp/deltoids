@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add support for Kotlin.
+- TUI: press `b` to browse local branches, step into a branch's commits with a preview of each commit's diff, and open a commit to read its files and diff. `Esc` steps back.
 - TUI: directory rows show an open-directory arrow.
 - TUI: fold and unfold directories in the Files sidebar with Enter.
 - TUI: add shortcuts to stage and discard changes in git.

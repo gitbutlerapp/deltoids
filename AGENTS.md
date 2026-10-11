@@ -46,6 +46,7 @@ crates/
     src/render_tui.rs         # Diff rendering for ratatui
     src/render_html.rs        # Diff rendering as HTML (feature `html`)
     src/git.rs                # Git blob lookup
+    src/git/history.rs        # Local branches, commit walks, commit patches
     src/content.rs            # Before/after content resolution
     src/intraline.rs          # Within-line diff algorithm
     src/reverse.rs            # Diff reversal
@@ -93,6 +94,11 @@ crates/
       text.rs               #   display width + word wrapping
       watch.rs              #   shared workdir watcher + reload filter
       tests.rs              #   shell tests (mock Mode)
+      test_screen.rs        #   draw any Mode to text (test helper)
+      workspace/             #   root Mode: working tree or history
+      history/               #   branches -> commits -> commit diff
+        mod.rs               #     History impl of Mode, list rendering
+        cursor.rs            #     list selection + scroll
       files/                 #   FilesMode (working-tree diff)
         mod.rs               #     FilesMode impl of Mode
         model.rs             #     parse/resolve/diff

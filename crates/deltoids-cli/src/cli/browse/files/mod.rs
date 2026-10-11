@@ -171,6 +171,10 @@ pub(super) struct FilesMode {
     review: review::Review,
     guidance: review::Guidance,
     hide_low: bool,
+    /// Sidebar title: "Files" for the working tree, the commit otherwise.
+    label: String,
+    /// A commit snapshot: no staging or discard actions.
+    read_only: bool,
 }
 
 impl FilesMode {
@@ -181,9 +185,18 @@ impl FilesMode {
     /// on the first successful tick. `initial_diff_width` seeds the diff
     /// cache for the first frame.
     pub(super) fn discover(theme: &Theme, initial_diff_width: usize) -> Self {
+        Self::discover_at(std::path::Path::new("."), theme, initial_diff_width)
+    }
+
+    /// [`Self::discover`] from the repository enclosing `path`.
+    pub(super) fn discover_at(
+        path: &std::path::Path,
+        theme: &Theme,
+        initial_diff_width: usize,
+    ) -> Self {
         // Not a repo: degrade to the static empty state so the TUI still
         // opens.
-        let Some(repo) = git::Repo::discover() else {
+        let Some(repo) = git::Repo::discover_at(path) else {
             return Self::empty(theme, initial_diff_width);
         };
         // Watch before the snapshot so edits during the build stay pending.
@@ -202,6 +215,77 @@ impl FilesMode {
         mode.review = review::Review::from_env();
         mode.start_review();
         mode
+    }
+
+    /// A static, read-only view of the patch `commit` introduces: its
+    /// file tree and diff, with comments and hunk reshaping but no
+    /// staging, discarding, or reload.
+    pub(super) fn commit(
+        repo: &git::Repo,
+        commit: &git::Commit,
+        theme: &Theme,
+        width: usize,
+    ) -> Result<Self, String> {
+        let patch = repo.commit_patch(&commit.id)?;
+        let model = model::build_commit_model(&patch, repo)?;
+        let mut mode = Self::new(model, Patches::default(), None, theme, width);
+        mode.label = format!("Commit {}", commit.short_id);
+        mode.read_only = true;
+        Ok(mode)
+    }
+
+    /// Draw only the diff pane into `right`. A history list shows this
+    /// as the preview of the selected commit beside its own left column.
+    pub(super) fn draw_diff(
+        &mut self,
+        frame: &mut ratatui::Frame<'_>,
+        right: Rect,
+        layout: ChangeLayout,
+        theme: &Theme,
+        budget: DrawBudget,
+        focused: bool,
+    ) {
+        self.diff_rect = right;
+        let spec = self
+            .panes
+            .view(self.sidebar.selection_display_range(), self.column);
+        let pane = match spec.column {
+            Column::Staged => &mut self.staged,
+            Column::Unstaged => &mut self.unstaged,
+        };
+        let width = super::diff_scrollbar::body_area(right).width as usize;
+        let column = spec.column;
+        let (model, review) = (&self.model, &self.review);
+        let lookup = |file: usize, hunk: usize| review.hunk_label(model, column, file, hunk);
+        pane.assemble_window(
+            &spec,
+            &self.model,
+            width,
+            layout,
+            theme,
+            budget,
+            &self.comments,
+            &HunkLabels {
+                revision: self.review.revision(),
+                lookup: &lookup,
+            },
+        );
+        pane.render(frame, right, focused, theme, self.status.as_deref());
+
+        if let InputState::Commenting { anchor, buffer, .. } = &self.input {
+            let label = format!("{}:{}", anchor.path, anchor.line);
+            render_comment_editor(frame, right, &label, buffer, theme);
+        }
+        if let InputState::Discarding { menu, selected } = &self.input {
+            action_menu::draw(frame, menu, *selected, theme);
+        }
+    }
+
+    /// Where the working tree's repository lives, for opening it again
+    /// (history reads it on its own handle). `None` without a repo.
+    pub(super) fn repo_dir(&self) -> Option<PathBuf> {
+        let repo = self.repo.as_ref()?;
+        Some(repo.workdir().unwrap_or(repo.git_dir()).to_path_buf())
     }
 
     /// Compute the working-tree diff and its model, or an error when the
@@ -281,6 +365,8 @@ impl FilesMode {
             review: review::Review::default(),
             guidance: review::Guidance::default(),
             hide_low: false,
+            label: "Files".to_string(),
+            read_only: false,
         };
         mode.start_review();
         mode
@@ -716,11 +802,12 @@ fn handle_key(state: &mut FilesMode, key: KeyCode, height: usize) -> AppCommand 
         state.toggle_hidden(height);
         return AppCommand::Continue;
     }
-    if state.focus == Focus::Sidebar && key == KeyCode::Char('a') {
+    if state.focus == Focus::Sidebar && key == KeyCode::Char('a') && !state.read_only {
         start_stage_all(state);
         return AppCommand::Continue;
     }
-    if state.focus == Focus::Sidebar && matches!(key, KeyCode::Char(' ' | 'd')) {
+    if state.focus == Focus::Sidebar && matches!(key, KeyCode::Char(' ' | 'd')) && !state.read_only
+    {
         start_action(state, key == KeyCode::Char(' '));
         return AppCommand::Continue;
     }
@@ -1119,7 +1206,9 @@ impl Mode for FilesMode {
 
     fn reserves_key(&self, key: KeyCode) -> bool {
         key == KeyCode::Char('f')
-            || self.focus == Focus::Sidebar && matches!(key, KeyCode::Char(' ' | 'd' | 'a'))
+            || !self.read_only
+                && self.focus == Focus::Sidebar
+                && matches!(key, KeyCode::Char(' ' | 'd' | 'a'))
     }
 
     fn draw(
@@ -1132,57 +1221,18 @@ impl Mode for FilesMode {
         budget: DrawBudget,
     ) {
         self.sidebar_rect = left;
-        self.diff_rect = right;
-
         let sidebar_focused = self.focus == Focus::Sidebar;
         sidebar_pane::draw_sidebar(
             frame,
             left,
             &self.sidebar,
+            &self.label,
             sidebar_pane::sidebar_footer(&self.sidebar, theme),
             sidebar_focused,
             theme,
         );
-
-        let spec = self
-            .panes
-            .view(self.sidebar.selection_display_range(), self.column);
-        let pane = match spec.column {
-            Column::Staged => &mut self.staged,
-            Column::Unstaged => &mut self.unstaged,
-        };
-        let width = super::diff_scrollbar::body_area(right).width as usize;
-        let column = spec.column;
-        let (model, review) = (&self.model, &self.review);
-        let lookup = |file: usize, hunk: usize| review.hunk_label(model, column, file, hunk);
-        pane.assemble_window(
-            &spec,
-            &self.model,
-            width,
-            layout,
-            theme,
-            budget,
-            &self.comments,
-            &HunkLabels {
-                revision: self.review.revision(),
-                lookup: &lookup,
-            },
-        );
-        pane.render(
-            frame,
-            right,
-            self.focus == Focus::Diff,
-            theme,
-            self.status.as_deref(),
-        );
-
-        if let InputState::Commenting { anchor, buffer, .. } = &self.input {
-            let label = format!("{}:{}", anchor.path, anchor.line);
-            render_comment_editor(frame, right, &label, buffer, theme);
-        }
-        if let InputState::Discarding { menu, selected } = &self.input {
-            action_menu::draw(frame, menu, *selected, theme);
-        }
+        let diff_focused = self.focus == Focus::Diff;
+        self.draw_diff(frame, right, layout, theme, budget, diff_focused);
     }
 
     fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand {

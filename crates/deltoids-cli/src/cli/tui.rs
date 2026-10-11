@@ -23,6 +23,14 @@ Keys:
 The diff shows staged and unstaged changes separately. When the selection
 has both, the diff title reads "Staged - Unstaged" and s switches between them.
 
+History, lazygit-style:
+- b:               browse local branches; the right pane shows the
+                   selected branch's log
+- Enter:           list the branch's commits, previewing each commit's
+                   diff; Enter again opens the commit's files and diff
+- Esc:             go back one step; from the branches, back to the
+                   working tree
+
 Review comments, with the diff pane focused (2):
 - c:               comment on the diff line under the cursor
 - d:               delete that line's comment
