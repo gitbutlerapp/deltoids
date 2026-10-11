@@ -14,7 +14,10 @@ use git2::{
 /// A discovered git repository, used to look up blobs by hash.
 pub struct Repo(Repository);
 
+mod history;
 mod snapshot;
+
+pub use history::{Branch, Commit};
 
 /// Patch and staging columns from one working-tree enumeration.
 ///
@@ -405,6 +408,7 @@ fn cat_file_filtered(workdir: &Path, hash: &str, path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    mod history;
     mod snapshot;
 
     use super::*;
