@@ -99,6 +99,7 @@ pub(super) fn make_state(files: &[ResolvedFile]) -> FilesMode {
         files: owned,
         bodies,
         stages: Default::default(),
+        columns: Default::default(),
     };
     let sidebar_files: Vec<SidebarFile<'_>> = model
         .files
@@ -132,7 +133,7 @@ pub(super) fn make_state(files: &[ResolvedFile]) -> FilesMode {
         input: InputState::Normal,
         status: None,
         model,
-        repo: None,
+        vcs: None,
         startup_pending: false,
         loading_since: None,
         last_input: Patches::default(),
@@ -143,6 +144,8 @@ pub(super) fn make_state(files: &[ResolvedFile]) -> FilesMode {
         review: super::review::Review::default(),
         guidance: super::review::Guidance::default(),
         hide_low: false,
+        label: "Files".to_string(),
+        read_only: false,
     };
     state.start_review();
     state
@@ -222,6 +225,7 @@ pub(super) fn model_from(files: &[ResolvedFile]) -> Model {
         files,
         bodies,
         stages: Default::default(),
+        columns: Default::default(),
     }
 }
 

@@ -1,7 +1,10 @@
 //! The scrolling TUI opened by `deltoids tui`.
 //!
-//! The left column is a file-tree sidebar and the right pane shows the
-//! working-tree diff. Both belong to [`files::FilesMode`].
+//! A lazygit-style layout: numbered side panels stacked in the left column
+//! (the working-tree files of [`files::FilesMode`] and the local branches
+//! of [`history::History`]) and the main view on the
+//! right. [`workspace::Workspace`] lays them out and routes input; each
+//! panel sits behind [`panel::Panel`].
 //!
 //! ## Module layout
 //!
@@ -10,7 +13,7 @@
 //! sidebar width, the `<`/`>` resize (per-burst coalesced), the help
 //! popup, the theme picker, custom commands, and the live-reload
 //! orchestration. Everything else lives behind [`mode::Mode`], whose
-//! production adapter is [`files::FilesMode`]; the shell tests drive the
+//! production adapter is [`workspace::Workspace`]; the shell tests drive the
 //! shell through a recording adapter.
 //!
 //! Each frame the shell also derives a [`mode::DrawBudget`] from whether
@@ -51,15 +54,21 @@ mod diff_scrollbar;
 mod events;
 mod files;
 mod help;
+mod history;
 mod mode;
+mod panel;
 mod scroll;
 mod sidebar_width;
 mod suspend;
 mod syntax_badge;
 mod terminal;
+#[cfg(test)]
+mod test_screen;
 mod text;
 mod theme_picker;
+mod vcs;
 mod watch;
+mod workspace;
 
 use command::{CustomCommand, load_commands};
 use events::read_event_burst;
@@ -68,6 +77,7 @@ use mode::{AppCommand, CustomRun, DrawBudget, Mode, Viewport};
 use sidebar_width::Preference;
 use terminal::TerminalSession;
 use theme_picker::{PickerAction, ThemePicker};
+use workspace::Workspace;
 
 /// Idle poll timeout for the event loop.
 const POLL_TIMEOUT: Duration = Duration::from_millis(250);
@@ -108,7 +118,7 @@ pub fn run() -> Result<(), String> {
     // iteration draws a loading frame and then builds it. Startup shows a
     // loading state instead of a blank screen during the (possibly slow)
     // build.
-    let mut mode = FilesMode::empty(&theme, initial_diff_width);
+    let mut mode = Workspace::new(FilesMode::empty(&theme, initial_diff_width));
 
     let mut shell = Shell::new(sidebar_pref, total_width, theme.syntax_theme_name.clone());
     shell.commands = load_commands();
@@ -800,13 +810,13 @@ fn draw_loading(frame: &mut ratatui::Frame<'_>, left: Rect, right: Rect, theme: 
     };
     frame.render_widget(
         loading(pane_block_with_title_line(
-            files::sidebar_title(border, theme),
+            panel::panel_title(border, '1', "Files", theme),
             border,
             None,
         )),
         left,
     );
-    frame.render_widget(loading(pane_block("─Diff─", border)), right);
+    frame.render_widget(loading(pane_block("─[0]─Diff─", border)), right);
 }
 
 /// Toggle the diff change-layout: `Grouped ⇆ interleaved`. Interleaved uses

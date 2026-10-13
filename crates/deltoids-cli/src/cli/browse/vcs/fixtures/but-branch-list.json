@@ -1,0 +1,74 @@
+{
+  "appliedStacks": [
+    {
+      "id": "1caad486-1084-4bf2-aad6-3a4ebe7fa8c7",
+      "heads": [
+        {
+          "name": "side",
+          "reviews": [],
+          "lastCommitAt": 1791901697000,
+          "commitsAhead": null,
+          "lastAuthor": {
+            "name": "t",
+            "email": "t@t"
+          },
+          "mergesCleanly": true
+        }
+      ]
+    },
+    {
+      "id": "7779ff4f-f4fd-4e96-9562-c37039339d68",
+      "heads": [
+        {
+          "name": "top-feature",
+          "reviews": [],
+          "lastCommitAt": 1791901697000,
+          "commitsAhead": null,
+          "lastAuthor": {
+            "name": "t",
+            "email": "t@t"
+          },
+          "mergesCleanly": true
+        },
+        {
+          "name": "base-feature",
+          "reviews": [],
+          "lastCommitAt": 1791901697000,
+          "commitsAhead": null,
+          "lastAuthor": {
+            "name": "t",
+            "email": "t@t"
+          },
+          "mergesCleanly": true
+        }
+      ]
+    }
+  ],
+  "branches": [
+    {
+      "name": "remote-only",
+      "reviews": [],
+      "hasLocal": false,
+      "lastCommitAt": 1791901698000,
+      "commitsAhead": 1,
+      "lastAuthor": {
+        "name": "t",
+        "email": "t@t"
+      },
+      "mergesCleanly": true
+    },
+    {
+      "name": "parked",
+      "reviews": [],
+      "hasLocal": true,
+      "lastCommitAt": 1791901697000,
+      "commitsAhead": 1,
+      "lastAuthor": {
+        "name": "t",
+        "email": "t@t"
+      },
+      "mergesCleanly": true
+    }
+  ],
+  "hasMoreBranches": false
+}

@@ -46,6 +46,7 @@ crates/
     src/render_tui.rs         # Diff rendering for ratatui
     src/render_html.rs        # Diff rendering as HTML (feature `html`)
     src/git.rs                # Git blob lookup
+    src/git/history.rs        # Local branches, commit walks, commit patches
     src/content.rs            # Before/after content resolution
     src/intraline.rs          # Within-line diff algorithm
     src/reverse.rs            # Diff reversal
@@ -78,7 +79,7 @@ crates/
     src/cli/browse/          # scrolling TUI
       mod.rs                 #   shell: loop, routing, layout, divider,
                              #     resize, help, reload orchestration
-      mode.rs               #   Mode trait (seam to FilesMode) + AppCommand
+      mode.rs               #   Mode trait (seam to Workspace) + AppCommand
       events.rs             #   input-event burst draining
       terminal.rs           #   terminal session guard
       sidebar_width.rs      #   sidebar sizing policy
@@ -93,7 +94,15 @@ crates/
       text.rs               #   display width + word wrapping
       watch.rs              #   shared workdir watcher + reload filter
       tests.rs              #   shell tests (mock Mode)
-      files/                 #   FilesMode (working-tree diff)
+      test_screen.rs        #   draw any Mode to text (test helper)
+      panel.rs              #   Panel trait (side panel + main view) + titles
+      workspace/             #   root Mode: lazygit layout, focus, routing
+        mod.rs               #     panel stack, keys, mouse, reload
+        tests.rs             #     layout and navigation tests
+      history/               #   [2] Branches panel (local, or GitButler's)
+        mod.rs               #     drill-down to a commit's files, list rendering
+        cursor.rs            #     list selection + scroll
+      files/                 #   FilesMode (working-tree diff; read-only commit view)
         mod.rs               #     FilesMode impl of Mode
         model.rs             #     parse/resolve/diff
         diff_pane.rs         #     diff pane slice
@@ -102,6 +111,13 @@ crates/
         reload.rs            #     working-tree watcher + rebuild
         review.rs            #     review guidance: Jev job, judgments, row notes
         test_support.rs      #     shared test fixtures
+      vcs/                   #   git vs GitButler: the only place they differ
+        mod.rs               #     Vcs (reads) + Writer (stage/discard)
+        git_writes.rs        #     git adapter: index + git CLI writes
+        gitbutler.rs         #     GitButler adapter: `but --json`
+        gitbutler/tests.rs   #     GitButler tests (stub `but`)
+        tests.rs             #     git writer tests
+        fixtures/            #     recorded `but --json` output
     src/cli/tui.rs           # `deltoids tui` entry (requires a terminal)
     src/bin/deltoids.rs      # Single binary dispatcher
 

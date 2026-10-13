@@ -6,18 +6,24 @@ use ratatui::widgets::{Clear, Paragraph, Wrap};
 use deltoids::Theme;
 use deltoids::render_tui::{pane_block, pane_border_color, rgb_to_color};
 
-use super::actions::{DiscardKind, PendingDiscard};
+use crate::cli::browse::vcs::{DiscardChoice, PendingDiscard};
 
+/// The discard menu. Until the selection is read it shows the
+/// repository's choices, none available.
 #[derive(Debug)]
 pub(super) enum DiscardMenu {
-    Checking,
+    Checking(Vec<DiscardChoice>),
     Ready(PendingDiscard),
-    Unavailable(String),
+    Unavailable(Vec<DiscardChoice>, String),
 }
 
 impl DiscardMenu {
-    pub(super) fn is_available(&self, kind: DiscardKind) -> bool {
-        matches!(self, Self::Ready(pending) if pending.is_available(kind))
+    /// The menu's rows above "Cancel".
+    pub(super) fn choices(&self) -> &[DiscardChoice] {
+        match self {
+            Self::Checking(choices) | Self::Unavailable(choices, _) => choices,
+            Self::Ready(pending) => pending.choices(),
+        }
     }
 }
 
@@ -41,16 +47,11 @@ pub(super) fn draw(
         _ => String::new(),
     };
     let mut lines = vec![Line::from(label), Line::from("")];
-    let labels = DiscardKind::ALL
-        .iter()
-        .map(|kind| kind.label())
-        .chain(["Cancel"]);
+    let choices = menu.choices();
+    let labels = choices.iter().map(|choice| choice.label).chain(["Cancel"]);
     for (index, label) in labels.enumerate() {
         let mut style = Style::default();
-        if DiscardKind::ALL
-            .get(index)
-            .is_some_and(|kind| !menu.is_available(*kind))
-        {
+        if choices.get(index).is_some_and(|choice| !choice.available) {
             style = style
                 .fg(rgb_to_color(theme.muted))
                 .add_modifier(Modifier::CROSSED_OUT);
@@ -65,14 +66,14 @@ pub(super) fn draw(
     }
     lines.push(Line::from(""));
     let description = match menu {
-        DiscardMenu::Checking => "Checking discard…",
-        DiscardMenu::Unavailable(reason) => reason,
-        DiscardMenu::Ready(pending) if !pending.is_available(DiscardKind::All) => {
+        DiscardMenu::Checking(_) => "Checking discard…",
+        DiscardMenu::Unavailable(_, reason) => reason,
+        DiscardMenu::Ready(_) if !choices.iter().any(|choice| choice.available) => {
             "No changes to discard"
         }
-        DiscardMenu::Ready(_) => DiscardKind::ALL
+        DiscardMenu::Ready(_) => choices
             .get(selected)
-            .map_or("", |kind| kind.description()),
+            .map_or("", |choice| choice.description),
     };
     lines.push(Line::from(description));
     frame.render_widget(Clear, popup);

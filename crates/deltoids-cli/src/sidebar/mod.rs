@@ -561,6 +561,12 @@ impl Sidebar {
         }
     }
 
+    /// Scroll just enough to show the selection in a pane `viewport`
+    /// rows tall, as after the pane shrinks.
+    pub fn reveal_selected(&mut self, viewport: usize) {
+        self.adjust_scroll(viewport);
+    }
+
     /// Keep the selected row inside `[scroll, scroll + viewport)`.
     fn adjust_scroll(&mut self, viewport: usize) {
         let viewport = viewport.max(1);
@@ -1335,5 +1341,26 @@ mod tests {
         assert_eq!(sidebar.row_count(), 0);
         assert!(sidebar.rows().is_empty());
         assert_eq!(sidebar.selected_file_index(), None);
+    }
+
+    #[test]
+    fn reveal_selected_scrolls_a_shrunken_pane_to_the_selection() {
+        let diffs = [fd("a.txt"), fd("b.txt"), fd("c.txt"), fd("d.txt")];
+        let files: Vec<_> = diffs
+            .iter()
+            .map(|file| SidebarFile {
+                file,
+                added: 1,
+                deleted: 0,
+                stage: None,
+            })
+            .collect();
+        let mut sidebar = Sidebar::build_with_icons(&files, &theme(), IconMode::Off);
+        sidebar.bottom(10);
+        assert_eq!(sidebar.scroll(), 0);
+
+        sidebar.reveal_selected(2);
+
+        assert_eq!(sidebar.scroll(), sidebar.selected() - 1);
     }
 }

@@ -5,7 +5,7 @@
 
 use crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -19,24 +19,6 @@ use deltoids::render_tui::{
 use crate::sidebar::{Sidebar, SidebarFile, display_path};
 
 use super::model::{Model, body_deltas};
-
-/// The sidebar's top border title in lazygit's style: `─[1]─Files─`. The
-/// `[1]` badge and the label use the bold accent; the `─` rules use
-/// `rule_color`, the pane's own border colour, so the title stays
-/// continuous with the border (accent when focused, plain otherwise).
-pub(crate) fn sidebar_title(rule_color: Color, theme: &Theme) -> Line<'static> {
-    let rule = Style::default().fg(rule_color);
-    let accent = Style::default()
-        .fg(rgb_to_color(theme.border_active))
-        .add_modifier(Modifier::BOLD);
-    Line::from(vec![
-        Span::styled("─", rule),
-        Span::styled("[1]", accent),
-        Span::styled("─", rule),
-        Span::styled("Files", accent),
-        Span::styled("─", rule),
-    ])
-}
 
 /// Build the sidebar from a model plus per-file delta counts.
 pub(super) fn build_sidebar(model: &Model, theme: &Theme) -> Sidebar {
@@ -99,6 +81,7 @@ pub(super) fn draw_sidebar(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     sidebar: &Sidebar,
+    title: Line<'static>,
     footer: Option<Line<'static>>,
     focused: bool,
     theme: &Theme,
@@ -139,7 +122,7 @@ pub(super) fn draw_sidebar(
     }
 
     let color = pane_border_color(focused, theme);
-    let block = pane_block_with_title_line(sidebar_title(color, theme), color, footer);
+    let block = pane_block_with_title_line(title, color, footer);
     frame.render_widget(Paragraph::new(visible).block(block), area);
 
     render_pane_scrollbar(
@@ -278,7 +261,17 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(width, 6);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| draw_sidebar(frame, frame.area(), sidebar, None, true, &Theme::default()))
+            .draw(|frame| {
+                draw_sidebar(
+                    frame,
+                    frame.area(),
+                    sidebar,
+                    Line::from("Files"),
+                    None,
+                    true,
+                    &Theme::default(),
+                )
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         (1..5)
@@ -381,20 +374,6 @@ mod tests {
 
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, " +2 ");
-    }
-
-    #[test]
-    fn sidebar_title_reads_files_with_accent_label_and_border_rules() {
-        let theme = Theme::default();
-        let rule_color = rgb_to_color(theme.border);
-        let line = sidebar_title(rule_color, &theme);
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "─[1]─Files─");
-        let files = line.spans.iter().find(|s| s.content == "Files").unwrap();
-        assert_eq!(files.style.fg, Some(rgb_to_color(theme.border_active)));
-        assert!(files.style.add_modifier.contains(Modifier::BOLD));
-        let rule = line.spans.iter().find(|s| s.content == "─").unwrap();
-        assert_eq!(rule.style.fg, Some(rule_color));
     }
 
     #[test]

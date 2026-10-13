@@ -23,18 +23,18 @@ fn fixture(paths: &[&str]) -> (TempDir, git2::Repository) {
 }
 
 fn live(dir: &Path) -> FilesMode {
-    let repo = git::Repo::discover_at(dir).unwrap();
+    let vcs = Vcs::discover_at(dir).unwrap();
     // Keep content resolution independent of the process cwd shared by parallel tests.
     let raw = git2::Repository::open(dir).unwrap();
-    for status in repo.working_tree_snapshot().unwrap().stages {
+    for status in vcs.repo().working_tree_snapshot().unwrap().stages {
         for path in status.paths {
             if let Ok(bytes) = fs::read(dir.join(path)) {
                 raw.blob(&bytes).unwrap();
             }
         }
     }
-    let (input, model) = FilesMode::try_model(&repo).unwrap();
-    FilesMode::new(model, input, Some(repo), &theme(), 80)
+    let (input, model) = FilesMode::try_model(&vcs).unwrap();
+    FilesMode::new(model, input, Some(vcs), &theme(), 80)
 }
 
 fn finish(mode: &mut FilesMode) {
@@ -77,7 +77,7 @@ fn sidebar_a_stages_outside_the_selected_directory_and_refreshes_without_notific
     assert!(Mode::reserves_key(&mode, KeyCode::Char('a')));
     Mode::handle_key(&mut mode, KeyCode::Char('a'), 20);
     Mode::handle_key(&mut mode, KeyCode::Char('a'), 20);
-    Mode::handle_key(&mut mode, KeyCode::Char('2'), 20);
+    crate::cli::browse::panel::Panel::focus_main(&mut mode, true);
     assert_eq!(mode.focus, Focus::Diff);
     finish(&mut mode);
     refresh(&mut mode);
@@ -98,7 +98,7 @@ fn sidebar_a_stages_outside_the_selected_directory_and_refreshes_without_notific
         .collect();
     assert_eq!(after, before);
     assert!(!Mode::reserves_key(&mode, KeyCode::Char('a')));
-    Mode::handle_key(&mut mode, KeyCode::Char('1'), 20);
+    crate::cli::browse::panel::Panel::focus_main(&mut mode, false);
     Mode::handle_key(&mut mode, KeyCode::Char('a'), 20);
     finish(&mut mode);
     refresh(&mut mode);
@@ -122,7 +122,7 @@ fn sidebar_a_uses_fresh_status_even_when_the_sidebar_is_empty() {
     let (dir, _) = fixture(&["a.txt"]);
     let mut mode = live(dir.path());
     fs::write(dir.path().join("a.txt"), "edited\n").unwrap();
-    Mode::handle_key(&mut mode, KeyCode::Char('1'), 20);
+    crate::cli::browse::panel::Panel::focus_main(&mut mode, false);
     Mode::handle_key(&mut mode, KeyCode::Char('a'), 20);
     finish(&mut mode);
     refresh(&mut mode);
@@ -441,7 +441,7 @@ fn no_repo_and_diff_focus_cannot_mutate_the_repository() {
     let (dir, _) = fixture(&["a.txt"]);
     fs::write(dir.path().join("a.txt"), "edited\n").unwrap();
     let mut mode = live(dir.path());
-    let repo = mode.repo.take();
+    let vcs = mode.vcs.take();
     Mode::handle_key(&mut mode, KeyCode::Char('a'), 20);
     assert!(mode.action_job.is_none());
     assert!(mode.status.as_deref().unwrap().contains("working tree"));
@@ -450,8 +450,8 @@ fn no_repo_and_diff_focus_cannot_mutate_the_repository() {
     assert!(mode.captures_text_input());
     assert!(mode.action_job.is_none());
     Mode::handle_key(&mut mode, KeyCode::Esc, 20);
-    mode.repo = repo;
-    Mode::handle_key(&mut mode, KeyCode::Char('2'), 20);
+    mode.vcs = vcs;
+    crate::cli::browse::panel::Panel::focus_main(&mut mode, true);
     Mode::handle_key(&mut mode, KeyCode::Char('a'), 20);
     Mode::handle_key(&mut mode, KeyCode::Char('d'), 20);
     Mode::handle_key(&mut mode, KeyCode::Char(' '), 20);
@@ -553,7 +553,7 @@ fn missing_repository_and_failed_preparation_leave_discard_disabled() {
     let (dir, _) = fixture(&["a.txt"]);
     fs::write(dir.path().join("a.txt"), "edited\n").unwrap();
     let mut mode = live(dir.path());
-    mode.repo = None;
+    mode.vcs = None;
     Mode::handle_key(&mut mode, KeyCode::Char('d'), 20);
     assert!(mode.captures_text_input());
     assert!(mode.action_job.is_none());
@@ -729,7 +729,7 @@ fn a_file_with_both_columns_shows_one_and_s_switches_to_the_other() {
     let mut mode = live(dir.path());
     select_file(&mut mode, "a.txt");
     let rows = settle(&mut mode);
-    assert!(rows[0].contains("[2]─Staged - Unstaged"), "{}", rows[0]);
+    assert!(rows[0].contains("[0]─Staged - Unstaged"), "{}", rows[0]);
     let body = rows.join("\n");
     assert!(body.contains("line 11 unstaged"), "unstaged is the default");
     assert!(!body.contains("line 2 staged"));
@@ -744,7 +744,7 @@ fn a_file_with_both_columns_shows_one_and_s_switches_to_the_other() {
     // the next file that has both.
     select_file(&mut mode, "b.txt");
     let rows = settle(&mut mode);
-    assert!(rows[0].contains("[2]─Unstaged changes"), "{}", rows[0]);
+    assert!(rows[0].contains("[0]─Unstaged changes"), "{}", rows[0]);
     Mode::handle_key(&mut mode, KeyCode::Char('s'), 20);
     assert_eq!(mode.shown(), Column::Unstaged, "s needs both columns");
     select_file(&mut mode, "a.txt");
@@ -878,7 +878,7 @@ fn a_comment_follows_its_file_into_the_staged_pane() {
     let mut mode = live(dir.path());
     select_file(&mut mode, "b.txt");
     comment_on(&mut mode, Column::Unstaged, LineSide::New, 1, "keep me");
-    Mode::handle_key(&mut mode, KeyCode::Char('1'), 20);
+    crate::cli::browse::panel::Panel::focus_main(&mut mode, false);
     Mode::handle_key(&mut mode, KeyCode::Char(' '), 20);
     finish(&mut mode);
     refresh(&mut mode);
@@ -971,7 +971,7 @@ fn z_expands_the_hunk_under_the_cursor_and_keeps_it_until_the_file_changes() {
     commit_index(&repo, "initial");
     write_and_store(dir.path(), "a.rs", &COUNTER.replace("+= 1", "+= 2"));
     let mut mode = live(dir.path());
-    Mode::handle_key(&mut mode, KeyCode::Char('2'), 20);
+    crate::cli::browse::panel::Panel::focus_main(&mut mode, true);
     while !cursor_text(&mut mode).contains("+= 2") {
         Mode::handle_key(&mut mode, KeyCode::Char('j'), 20);
     }
@@ -1243,4 +1243,37 @@ fn hidden_low_value_files_stay_hidden_across_a_reload() {
         .map(|&index| display_path(&mode.model.files[index].file).to_string())
         .collect();
     assert_eq!(shown, ["CHANGELOG.md", "src/a.txt"]);
+}
+
+#[test]
+fn entering_a_gitbutler_workspace_shows_one_uncommitted_column_and_one_discard() {
+    let (dir, repo) = fixture(&["a.txt"]);
+    fs::write(dir.path().join("a.txt"), "staged\n").unwrap();
+    stage_all(&repo);
+    fs::write(dir.path().join("a.txt"), "edited\n").unwrap();
+    let mut mode = live(dir.path());
+    let before = settle(&mut mode).join("\n");
+    assert!(before.contains("Staged - Unstaged"), "{before}");
+
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("gitbutler/workspace", &head, true).unwrap();
+    drop(head);
+    repo.set_head("refs/heads/gitbutler/workspace").unwrap();
+    mode.reload(
+        Viewport {
+            height: 20,
+            diff_width: 80,
+        },
+        &theme(),
+    )
+    .unwrap();
+    let after = settle(&mut mode).join("\n");
+    assert!(after.contains("Uncommitted changes"), "{after}");
+    assert!(!after.contains("Staged"), "{after}");
+
+    Mode::handle_key(&mut mode, KeyCode::Char('d'), 20);
+    finish(&mut mode);
+    let menu = screen(&mut mode, DrawBudget::Full).join("\n");
+    assert!(menu.contains("Discard all changes"), "{menu}");
+    assert!(!menu.contains("Discard unstaged changes"), "{menu}");
 }

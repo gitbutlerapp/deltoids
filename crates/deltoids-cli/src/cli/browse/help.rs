@@ -20,7 +20,12 @@ use super::mode::AppCommand;
 /// table inside the popup.
 pub(super) const HELP_KEYS: &[(&str, &str)] = &[
     ("?", "toggle this help"),
-    ("Tab / 1 / 2", "focus sidebar / diff"),
+    ("1 / 2 / 0", "focus a side panel / the main view"),
+    ("Tab / Shift+Tab", "next / previous side panel"),
+    ("h / l", "previous / next side panel"),
+    ("Enter", "focus a file's diff / drill into branch, commit"),
+    ("Esc", "leave the main view / back out of a branch"),
+    ("Tab (main view)", "switch staged / unstaged diff"),
     ("j / k", "move (list, or between diff lines)"),
     ("Shift+J / K", "scroll diff three lines (any focus)"),
     ("Shift / Ctrl+wheel", "step through files"),

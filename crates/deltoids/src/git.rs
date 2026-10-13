@@ -14,7 +14,10 @@ use git2::{
 /// A discovered git repository, used to look up blobs by hash.
 pub struct Repo(Repository);
 
+mod history;
 mod snapshot;
+
+pub use history::{Branch, Commit};
 
 /// Patch and staging columns from one working-tree enumeration.
 ///
@@ -91,6 +94,38 @@ impl Repo {
         self.0.commondir()
     }
 
+    /// The ref `HEAD` points at (`refs/heads/main`), or `None` when `HEAD`
+    /// is detached or unreadable.
+    pub fn head_ref(&self) -> Option<String> {
+        let head = self.0.find_reference("HEAD").ok()?;
+        head.symbolic_target().ok().flatten().map(str::to_string)
+    }
+
+    /// A fingerprint of `HEAD` and every ref's name and target. Two equal
+    /// fingerprints mean no ref moved, appeared, or disappeared between
+    /// the reads.
+    pub fn refs_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hash_ref = |reference: &git2::Reference<'_>| {
+            reference.name_bytes().hash(&mut hasher);
+            reference.symbolic_target_bytes().hash(&mut hasher);
+            reference
+                .target()
+                .map(|oid| oid.to_string())
+                .hash(&mut hasher);
+        };
+        if let Ok(head) = self.0.find_reference("HEAD") {
+            hash_ref(&head);
+        }
+        if let Ok(references) = self.0.references() {
+            for reference in references.flatten() {
+                hash_ref(&reference);
+            }
+        }
+        hasher.finish()
+    }
+
     /// Whether `path` is gitignored. Accepts an absolute path inside the
     /// working tree or a workdir-relative path.
     ///
@@ -127,9 +162,10 @@ impl Repo {
     /// produces. `path` is a workdir-relative path used to resolve which
     /// filter applies.
     ///
-    /// On a non-filtered file this is byte-identical to the raw blob
-    /// content, so it is safe to apply to every ODB blob. libgit2 cannot
-    /// run external process filters, so this shells out to the git CLI.
+    /// A blob a checkout writes unchanged is read in process. Only a path
+    /// a checkout transforms (see [`Self::checkout_transforms`]) shells
+    /// out to the git CLI, which runs the external filter processes
+    /// libgit2 cannot.
     ///
     /// Returns `None` if the hash is null, git is unavailable, the blob is
     /// not in the ODB, the command fails, or the result is not valid
@@ -139,8 +175,36 @@ impl Repo {
         if is_null_hash(hash) {
             return None;
         }
-        let workdir = self.0.workdir()?;
-        cat_file_filtered(workdir, hash, path)
+        if self.checkout_transforms(path) {
+            return cat_file_filtered(self.0.workdir()?, hash, path);
+        }
+        let blob = self.0.revparse_single(hash).ok()?.peel_to_blob().ok()?;
+        String::from_utf8(blob.content().to_vec()).ok()
+    }
+
+    /// Whether a checkout of `path` can write bytes other than the blob's:
+    /// a `filter`, `ident`, or `working-tree-encoding` attribute, an
+    /// `eol=crlf` attribute, `core.autocrlf=true`, or `core.eol=crlf`.
+    fn checkout_transforms(&self, path: &str) -> bool {
+        let attr = |name| {
+            let value = self
+                .0
+                .get_attr_bytes(Path::new(path), name, AttrCheckFlags::FILE_THEN_INDEX)
+                .ok()
+                .flatten();
+            AttrValue::always_bytes(value)
+        };
+        let set = |name| !matches!(attr(name), AttrValue::Unspecified | AttrValue::False);
+        let config = self.0.config().ok();
+        let config_str = |name| config.as_ref()?.get_string(name).ok();
+        set("filter")
+            || set("ident")
+            || set("working-tree-encoding")
+            || matches!(attr("eol"), AttrValue::Bytes(b"crlf"))
+            || config
+                .as_ref()
+                .is_some_and(|c| c.get_bool("core.autocrlf").unwrap_or(false))
+            || config_str("core.eol").is_some_and(|eol| eol.eq_ignore_ascii_case("crlf"))
     }
 
     /// Unified diff of the working tree against `HEAD`, as patch text
@@ -405,6 +469,7 @@ fn cat_file_filtered(workdir: &Path, hash: &str, path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    mod history;
     mod snapshot;
 
     use super::*;
@@ -1187,6 +1252,38 @@ mod tests {
         assert_eq!(
             wrapper.blob_filtered(&hash, "plain.txt").as_deref(),
             Some("no filter here\n")
+        );
+    }
+
+    #[test]
+    fn blob_filtered_converts_line_endings_like_a_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        git_cli(dir.path(), &["init", "-q"]);
+        fs::write(dir.path().join(".gitattributes"), "crlf.txt eol=crlf\n").unwrap();
+        fs::write(dir.path().join("crlf.txt"), "one\ntwo\n").unwrap();
+        fs::write(dir.path().join("auto.txt"), "one\ntwo\n").unwrap();
+        git_cli(dir.path(), &["add", "-A"]);
+        git_cli(dir.path(), &["commit", "-qm", "init"]);
+        let hash = |path: &str| {
+            let out = git_cli(dir.path(), &["rev-parse", &format!("HEAD:{path}")]);
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let (crlf, auto) = (hash("crlf.txt"), hash("auto.txt"));
+
+        let wrapper = Repo(Repository::open(dir.path()).unwrap());
+        assert_eq!(
+            wrapper.blob_filtered(&crlf, "crlf.txt").as_deref(),
+            Some("one\r\ntwo\r\n")
+        );
+        assert_eq!(
+            wrapper.blob_filtered(&auto, "auto.txt").as_deref(),
+            Some("one\ntwo\n")
+        );
+        git_cli(dir.path(), &["config", "core.autocrlf", "true"]);
+        let wrapper = Repo(Repository::open(dir.path()).unwrap());
+        assert_eq!(
+            wrapper.blob_filtered(&auto, "auto.txt").as_deref(),
+            Some("one\r\ntwo\r\n")
         );
     }
 

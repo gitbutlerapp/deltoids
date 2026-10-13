@@ -41,6 +41,7 @@ use crate::cli::browse::watch::{
     ChangeReceiver, ChangeWatcher, path_warrants_reload, spawn_workdir_watcher,
 };
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -54,9 +55,11 @@ use crate::sidebar::{Sidebar, display_path};
 use super::comment_view::render_comment_editor;
 use super::comments::{CommentAnchor, CommentStore, reanchor, review_text};
 use super::mode::{AppCommand, BackgroundWork, DrawBudget, Mode, Viewport};
+use super::panel::{self, panel_title};
+use super::vcs::{PendingDiscard, Vcs};
+use deltoids::render_tui::pane_border_color;
 
 mod action_menu;
-mod actions;
 mod diff_pane;
 #[cfg(test)]
 mod interaction_tests;
@@ -79,13 +82,20 @@ use model::build_model;
 use model::{Column, Model};
 use reload::{Patches, ReloadOutcome, reload_working_tree};
 use sidebar_pane::build_sidebar;
-pub(crate) use sidebar_pane::sidebar_title;
 use stage_panes::{PaneSpec, PaneTitle, StagePanes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Focus {
     Sidebar,
     Diff,
+}
+
+/// What a finished stage or discard job hands back.
+enum ActionOutcome {
+    /// The write ran; the status-line message.
+    Applied(String),
+    /// A discard read its selection and waits for the user's choice.
+    Choose(PendingDiscard),
 }
 
 /// Whether the diff pane is being browsed or a comment is being typed.
@@ -113,6 +123,65 @@ enum InputState {
 /// window; only a genuinely persistent error keeps failing past it. Kept
 /// generous so a burst of transient races never trips it.
 const STARTUP_LOADING_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// A commit's diff building on a worker thread: its patch read, both
+/// sides of every file resolved, and every file diffed, off the UI
+/// thread. [`Self::ready`] polls it; [`Self::view`] turns the finished
+/// build into the commit's read-only [`FilesMode`].
+pub(super) struct CommitJob {
+    short_id: String,
+    receiver: mpsc::Receiver<Result<model::Model, String>>,
+    built: Option<Result<model::Model, String>>,
+}
+
+impl CommitJob {
+    /// Start building `commit` from the repository at `repo_dir`.
+    pub(super) fn start(repo_dir: PathBuf, commit: &git::Commit) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let id = commit.id.clone();
+        std::thread::spawn(move || {
+            let built = git::Repo::discover_at(&repo_dir)
+                .ok_or_else(|| "Not a git repository".to_string())
+                .and_then(|repo| {
+                    let patch = repo.commit_patch(&id)?;
+                    model::build_commit_model(&patch, &repo)
+                });
+            let _ = sender.send(built);
+        });
+        Self {
+            short_id: commit.short_id.clone(),
+            receiver,
+            built: None,
+        }
+    }
+
+    /// Whether the build finished. Never blocks.
+    pub(super) fn ready(&mut self) -> bool {
+        if self.built.is_none() {
+            self.built = match self.receiver.try_recv() {
+                Ok(built) => Some(built),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Building the commit's diff failed".to_string()))
+                }
+            };
+        }
+        self.built.is_some()
+    }
+
+    /// The commit's static, read-only view: its file tree and diff, with
+    /// comments and hunk reshaping but no staging, discarding, or
+    /// reload. Call once [`Self::ready`] says the build finished.
+    pub(super) fn view(self, theme: &Theme, width: usize) -> Result<FilesMode, String> {
+        let built = self
+            .built
+            .unwrap_or_else(|| Err("The commit's diff is still building".to_string()));
+        let mut mode = FilesMode::new(built?, Patches::default(), None, theme, width);
+        mode.label = format!("Commit {}", self.short_id);
+        mode.read_only = true;
+        Ok(mode)
+    }
+}
 
 /// Files-mode state plus the data it renders. Owns the model, the repo
 /// (for blob resolution and reload), and the reload bookkeeping; the
@@ -147,8 +216,8 @@ pub(super) struct FilesMode {
     status: Option<String>,
     /// The owned data: resolved files plus their diffs.
     model: Model,
-    /// The repo (for blob resolution and working-tree reload), if any.
-    repo: Option<git::Repo>,
+    /// The repository (for blob resolution, reload, and writes), if any.
+    vcs: Option<Vcs>,
     /// True while a repo-backed startup is still resolving its first diff
     /// (the initial build lost a race): the pane shows "Loading…" and the
     /// first successful reload promotes it to a live view. `loading_since`
@@ -166,11 +235,15 @@ pub(super) struct FilesMode {
     /// Keeps the bounded filesystem watcher alive for the session.
     _watcher: Option<ChangeWatcher>,
     reload_failed: bool,
-    action_job: Option<std::sync::mpsc::Receiver<Result<actions::DiscardOutcome, String>>>,
+    action_job: Option<std::sync::mpsc::Receiver<Result<ActionOutcome, String>>>,
     refresh_requested: bool,
     review: review::Review,
     guidance: review::Guidance,
     hide_low: bool,
+    /// Sidebar title: "Files" for the working tree, the commit otherwise.
+    label: String,
+    /// A commit snapshot: no staging or discard actions.
+    read_only: bool,
 }
 
 impl FilesMode {
@@ -181,22 +254,31 @@ impl FilesMode {
     /// on the first successful tick. `initial_diff_width` seeds the diff
     /// cache for the first frame.
     pub(super) fn discover(theme: &Theme, initial_diff_width: usize) -> Self {
+        Self::discover_at(std::path::Path::new("."), theme, initial_diff_width)
+    }
+
+    /// [`Self::discover`] from the repository enclosing `path`.
+    pub(super) fn discover_at(
+        path: &std::path::Path,
+        theme: &Theme,
+        initial_diff_width: usize,
+    ) -> Self {
         // Not a repo: degrade to the static empty state so the TUI still
         // opens.
-        let Some(repo) = git::Repo::discover() else {
+        let Some(vcs) = Vcs::discover_at(path) else {
             return Self::empty(theme, initial_diff_width);
         };
         // Watch before the snapshot so edits during the build stay pending.
-        let watcher = crate::cli::browse::watch::spawn_workdir_watcher(&repo)
+        let watcher = crate::cli::browse::watch::spawn_workdir_watcher(vcs.repo())
             .ok()
             .flatten();
-        let mut mode = match Self::try_model(&repo) {
-            Ok((input, model)) => Self::new(model, input, Some(repo), theme, initial_diff_width),
+        let mut mode = match Self::try_model(&vcs) {
+            Ok((input, model)) => Self::new(model, input, Some(vcs), theme, initial_diff_width),
             // A repo-backed build lost a race (a size-check or content
             // race). Rather than a static error screen, open a reloadable
             // "Loading…" mode; explicit retries and the first
             // stable tick promotes it to a live diff.
-            Err(_) => Self::loading(repo, theme, initial_diff_width),
+            Err(_) => Self::loading(vcs, theme, initial_diff_width),
         };
         mode._watcher = watcher;
         mode.review = review::Review::from_env();
@@ -204,12 +286,66 @@ impl FilesMode {
         mode
     }
 
+    /// Draw only the diff pane into `right`. A history list shows this
+    /// as the preview of the selected commit beside its own left column.
+    pub(super) fn draw_diff(
+        &mut self,
+        frame: &mut ratatui::Frame<'_>,
+        right: Rect,
+        layout: ChangeLayout,
+        theme: &Theme,
+        budget: DrawBudget,
+        focused: bool,
+    ) {
+        self.diff_rect = right;
+        let spec = self
+            .panes
+            .view(self.sidebar.selection_display_range(), self.column);
+        let pane = match spec.column {
+            Column::Staged => &mut self.staged,
+            Column::Unstaged => &mut self.unstaged,
+        };
+        let width = super::diff_scrollbar::body_area(right).width as usize;
+        let column = spec.column;
+        let (model, review) = (&self.model, &self.review);
+        let lookup = |file: usize, hunk: usize| review.hunk_label(model, column, file, hunk);
+        pane.assemble_window(
+            &spec,
+            &self.model,
+            width,
+            layout,
+            theme,
+            budget,
+            &self.comments,
+            &HunkLabels {
+                revision: self.review.revision(),
+                lookup: &lookup,
+            },
+        );
+        pane.render(frame, right, focused, theme, self.status.as_deref());
+
+        if let InputState::Commenting { anchor, buffer, .. } = &self.input {
+            let label = format!("{}:{}", anchor.path, anchor.line);
+            render_comment_editor(frame, right, &label, buffer, theme);
+        }
+        if let InputState::Discarding { menu, selected } = &self.input {
+            action_menu::draw(frame, menu, *selected, theme);
+        }
+    }
+
+    /// Where the working tree's repository lives, for opening it again
+    /// (history reads it on its own handle). `None` without a repo.
+    pub(super) fn repo_dir(&self) -> Option<PathBuf> {
+        let repo = self.vcs.as_ref()?.repo();
+        Some(repo.workdir().unwrap_or(repo.git_dir()).to_path_buf())
+    }
+
     /// Compute the working-tree diff and its model, or an error when the
     /// diff read or model build loses a race with on-disk churn.
-    fn try_model(repo: &git::Repo) -> Result<(Patches, Model), String> {
-        let snapshot = repo.working_tree_snapshot()?;
-        let model = model::build_working_model(&snapshot, repo)?;
-        Ok((Patches::of(&snapshot), model))
+    fn try_model(vcs: &Vcs) -> Result<(Patches, Model), String> {
+        let working = vcs.working_tree()?;
+        let model = model::build_working_model(&working, vcs.repo())?;
+        Ok((Patches::of(&working.snapshot), model))
     }
 
     /// A cheap empty Files mode: no repo, no diff, static. Used as the
@@ -226,8 +362,8 @@ impl FilesMode {
     /// [`FilesMode::reload`] promotes it out of Loading, or degrades it to
     /// the static error state once failures persist past
     /// [`STARTUP_LOADING_TIMEOUT`].
-    fn loading(repo: git::Repo, theme: &Theme, width: usize) -> Self {
-        let mut mode = Self::new(Model::empty(), Patches::default(), Some(repo), theme, width);
+    fn loading(vcs: Vcs, theme: &Theme, width: usize) -> Self {
+        let mut mode = Self::new(Model::empty(), Patches::default(), Some(vcs), theme, width);
         mode.startup_pending = true;
         mode.loading_since = Some(Instant::now());
         mode.unstaged.set_empty_loading();
@@ -245,13 +381,7 @@ impl FilesMode {
         mode
     }
 
-    fn new(
-        model: Model,
-        input: Patches,
-        repo: Option<git::Repo>,
-        theme: &Theme,
-        width: usize,
-    ) -> Self {
+    fn new(model: Model, input: Patches, vcs: Option<Vcs>, theme: &Theme, width: usize) -> Self {
         let sidebar = build_sidebar(&model, theme);
         let display_order = sidebar.display_order();
         let panes = StagePanes::new(&model, &display_order);
@@ -270,7 +400,7 @@ impl FilesMode {
             input: InputState::Normal,
             status: None,
             model,
-            repo,
+            vcs,
             startup_pending: false,
             loading_since: None,
             last_input: input,
@@ -281,6 +411,8 @@ impl FilesMode {
             review: review::Review::default(),
             guidance: review::Guidance::default(),
             hide_low: false,
+            label: "Files".to_string(),
+            read_only: false,
         };
         mode.start_review();
         mode
@@ -529,33 +661,29 @@ fn start_stage_all(state: &mut FilesMode) {
     if state.action_job.is_some() {
         return;
     }
-    let Some(workdir) = state
-        .repo
-        .as_ref()
-        .and_then(|r| r.workdir())
-        .map(PathBuf::from)
-    else {
+    let Some(writer) = state.vcs.as_ref().and_then(Vcs::writer) else {
         state.status = Some("Git actions require a working tree".into());
         return;
     };
     state.status = Some("Updating staging for all files…".into());
     spawn_action(state, move || {
-        actions::toggle_stage_all(&workdir).map(actions::DiscardOutcome::Applied)
+        writer.toggle_stage_all().map(ActionOutcome::Applied)
     });
 }
 
 fn start_action(state: &mut FilesMode, stage: bool) {
+    let placeholders = Vcs::discard_placeholders(state.vcs.as_ref());
     if !stage {
         state.input = InputState::Discarding {
-            menu: action_menu::DiscardMenu::Checking,
-            selected: 2,
+            selected: placeholders.len(),
+            menu: action_menu::DiscardMenu::Checking(placeholders.clone()),
         };
     }
     let unavailable = |state: &mut FilesMode, reason: &str| {
         if !stage {
             state.input = InputState::Discarding {
-                menu: action_menu::DiscardMenu::Unavailable(reason.into()),
-                selected: 2,
+                selected: placeholders.len(),
+                menu: action_menu::DiscardMenu::Unavailable(placeholders.clone(), reason.into()),
             };
         }
     };
@@ -570,12 +698,7 @@ fn start_action(state: &mut FilesMode, stage: bool) {
         unavailable(state, "No files selected");
         return;
     };
-    let Some(workdir) = state
-        .repo
-        .as_ref()
-        .and_then(|r| r.workdir())
-        .map(PathBuf::from)
-    else {
+    let Some(writer) = state.vcs.as_ref().and_then(Vcs::writer) else {
         let reason = "Git actions require a working tree";
         unavailable(state, reason);
         if stage {
@@ -605,16 +728,16 @@ fn start_action(state: &mut FilesMode, stage: bool) {
     spawn_action(state, move || {
         let targets = targets.into_iter().collect();
         if stage {
-            actions::toggle_stage(&workdir, targets).map(actions::DiscardOutcome::Applied)
+            writer.toggle_stage(targets).map(ActionOutcome::Applied)
         } else {
-            actions::discard(&workdir, targets)
+            writer.discard(targets).map(ActionOutcome::Choose)
         }
     });
 }
 
 fn spawn_action(
     state: &mut FilesMode,
-    action: impl FnOnce() -> Result<actions::DiscardOutcome, String> + Send + 'static,
+    action: impl FnOnce() -> Result<ActionOutcome, String> + Send + 'static,
 ) {
     let (sender, receiver) = std::sync::mpsc::channel();
     state.action_job = Some(receiver);
@@ -636,30 +759,32 @@ fn collect_action(state: &mut FilesMode) -> bool {
     state.action_job = None;
     state.status = None;
     match result {
-        Ok(actions::DiscardOutcome::Choose(pending)) => {
+        Ok(ActionOutcome::Choose(pending)) => {
             if let InputState::Discarding {
-                menu: menu @ action_menu::DiscardMenu::Checking,
+                menu: menu @ action_menu::DiscardMenu::Checking(_),
                 selected,
             } = &mut state.input
             {
-                *selected = actions::DiscardKind::ALL
+                let choices = pending.choices();
+                *selected = choices
                     .iter()
-                    .position(|kind| pending.is_available(*kind))
-                    .unwrap_or(2);
+                    .position(|choice| choice.available)
+                    .unwrap_or(choices.len());
                 *menu = action_menu::DiscardMenu::Ready(pending);
             }
         }
-        Ok(actions::DiscardOutcome::Applied(message)) => {
+        Ok(ActionOutcome::Applied(message)) => {
             state.status = (!message.is_empty()).then_some(message);
             state.refresh_requested = true;
         }
         Err(message) => {
-            if let InputState::Discarding {
-                menu: menu @ action_menu::DiscardMenu::Checking,
-                ..
-            } = &mut state.input
+            if let InputState::Discarding { menu, .. } = &mut state.input
+                && let action_menu::DiscardMenu::Checking(placeholders) = menu
             {
-                *menu = action_menu::DiscardMenu::Unavailable(message.clone());
+                *menu = action_menu::DiscardMenu::Unavailable(
+                    std::mem::take(placeholders),
+                    message.clone(),
+                );
             }
             state.status = Some(format!("Git action failed: {message}"));
             state.refresh_requested = true;
@@ -672,25 +797,30 @@ fn handle_discard_key(state: &mut FilesMode, key: KeyCode) -> AppCommand {
     let InputState::Discarding { menu, selected } = &mut state.input else {
         return AppCommand::Continue;
     };
-    let cancel = actions::DiscardKind::ALL.len();
+    let cancel = menu.choices().len();
     match key {
         KeyCode::Char('j') | KeyCode::Down => *selected = (*selected + 1).min(cancel),
         KeyCode::Char('k') | KeyCode::Up => *selected = selected.saturating_sub(1),
         KeyCode::Esc => state.input = InputState::Normal,
         KeyCode::Enter => {
-            let kind = actions::DiscardKind::ALL.get(*selected).copied();
-            if kind.is_some_and(|kind| !menu.is_available(kind)) {
+            let choice = menu.choices().get(*selected);
+            if choice.is_some_and(|choice| !choice.available) {
                 return AppCommand::Continue;
             }
+            let kind = choice.map(|choice| choice.kind);
+            let writer = state.vcs.as_ref().and_then(Vcs::writer);
             if let InputState::Discarding {
                 menu: action_menu::DiscardMenu::Ready(pending),
                 ..
             } = std::mem::replace(&mut state.input, InputState::Normal)
                 && let Some(kind) = kind
+                && let Some(writer) = writer
             {
                 state.status = Some("Discarding changes…".into());
                 spawn_action(state, move || {
-                    actions::complete_discard(pending, kind).map(actions::DiscardOutcome::Applied)
+                    writer
+                        .complete_discard(pending, kind)
+                        .map(ActionOutcome::Applied)
                 });
             }
         }
@@ -716,11 +846,12 @@ fn handle_key(state: &mut FilesMode, key: KeyCode, height: usize) -> AppCommand 
         state.toggle_hidden(height);
         return AppCommand::Continue;
     }
-    if state.focus == Focus::Sidebar && key == KeyCode::Char('a') {
+    if state.focus == Focus::Sidebar && key == KeyCode::Char('a') && !state.read_only {
         start_stage_all(state);
         return AppCommand::Continue;
     }
-    if state.focus == Focus::Sidebar && matches!(key, KeyCode::Char(' ' | 'd')) {
+    if state.focus == Focus::Sidebar && matches!(key, KeyCode::Char(' ' | 'd')) && !state.read_only
+    {
         start_action(state, key == KeyCode::Char(' '));
         return AppCommand::Continue;
     }
@@ -742,6 +873,18 @@ fn handle_key(state: &mut FilesMode, key: KeyCode, height: usize) -> AppCommand 
             state.toggle_column();
             AppCommand::Continue
         }
+        // In the diff, Tab switches staged and unstaged like `s`.
+        KeyCode::Tab | KeyCode::BackTab if state.focus == Focus::Diff => {
+            state.toggle_column();
+            AppCommand::Continue
+        }
+        // Enter on a file opens its diff; on a directory it folds.
+        KeyCode::Enter
+            if state.focus == Focus::Sidebar && state.sidebar.selected_file_index().is_some() =>
+        {
+            state.focus = Focus::Diff;
+            AppCommand::Continue
+        }
         KeyCode::Char('z') => {
             match state.focus {
                 Focus::Diff => reshape_hunk(state, Diff::expand),
@@ -754,21 +897,6 @@ fn handle_key(state: &mut FilesMode, key: KeyCode, height: usize) -> AppCommand 
                 Focus::Diff => reshape_hunk(state, Diff::shrink),
                 Focus::Sidebar => reshape_selection(state, Diff::shrink_all),
             }
-            AppCommand::Continue
-        }
-        KeyCode::Tab | KeyCode::BackTab => {
-            state.focus = match state.focus {
-                Focus::Sidebar => Focus::Diff,
-                Focus::Diff => Focus::Sidebar,
-            };
-            AppCommand::Continue
-        }
-        KeyCode::Char('1') => {
-            state.focus = Focus::Sidebar;
-            AppCommand::Continue
-        }
-        KeyCode::Char('2') => {
-            state.focus = Focus::Diff;
             AppCommand::Continue
         }
         // Shift+J/K always scroll the diff regardless of focus.
@@ -1119,7 +1247,9 @@ impl Mode for FilesMode {
 
     fn reserves_key(&self, key: KeyCode) -> bool {
         key == KeyCode::Char('f')
-            || self.focus == Focus::Sidebar && matches!(key, KeyCode::Char(' ' | 'd' | 'a'))
+            || !self.read_only
+                && self.focus == Focus::Sidebar
+                && matches!(key, KeyCode::Char(' ' | 'd' | 'a'))
     }
 
     fn draw(
@@ -1131,58 +1261,10 @@ impl Mode for FilesMode {
         theme: &Theme,
         budget: DrawBudget,
     ) {
-        self.sidebar_rect = left;
-        self.diff_rect = right;
-
-        let sidebar_focused = self.focus == Focus::Sidebar;
-        sidebar_pane::draw_sidebar(
-            frame,
-            left,
-            &self.sidebar,
-            sidebar_pane::sidebar_footer(&self.sidebar, theme),
-            sidebar_focused,
-            theme,
-        );
-
-        let spec = self
-            .panes
-            .view(self.sidebar.selection_display_range(), self.column);
-        let pane = match spec.column {
-            Column::Staged => &mut self.staged,
-            Column::Unstaged => &mut self.unstaged,
-        };
-        let width = super::diff_scrollbar::body_area(right).width as usize;
-        let column = spec.column;
-        let (model, review) = (&self.model, &self.review);
-        let lookup = |file: usize, hunk: usize| review.hunk_label(model, column, file, hunk);
-        pane.assemble_window(
-            &spec,
-            &self.model,
-            width,
-            layout,
-            theme,
-            budget,
-            &self.comments,
-            &HunkLabels {
-                revision: self.review.revision(),
-                lookup: &lookup,
-            },
-        );
-        pane.render(
-            frame,
-            right,
-            self.focus == Focus::Diff,
-            theme,
-            self.status.as_deref(),
-        );
-
-        if let InputState::Commenting { anchor, buffer, .. } = &self.input {
-            let label = format!("{}:{}", anchor.path, anchor.line);
-            render_comment_editor(frame, right, &label, buffer, theme);
-        }
-        if let InputState::Discarding { menu, selected } = &self.input {
-            action_menu::draw(frame, menu, *selected, theme);
-        }
+        let (sidebar_focused, diff_focused) =
+            (self.focus == Focus::Sidebar, self.focus == Focus::Diff);
+        panel::Panel::draw_side(self, frame, left, '1', sidebar_focused, theme);
+        self.draw_diff(frame, right, layout, theme, budget, diff_focused);
     }
 
     fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand {
@@ -1204,7 +1286,7 @@ impl Mode for FilesMode {
     }
 
     fn watch(&mut self) -> Result<Option<ChangeReceiver>, String> {
-        let Some(repo) = self.repo.as_ref() else {
+        let Some(repo) = self.vcs.as_ref().map(Vcs::repo) else {
             return Ok(None);
         };
         if !self
@@ -1221,9 +1303,9 @@ impl Mode for FilesMode {
     }
 
     fn should_reload(&self, paths: &[PathBuf]) -> bool {
-        self.repo
+        self.vcs
             .as_ref()
-            .is_some_and(|repo| path_warrants_reload(repo, paths))
+            .is_some_and(|vcs| path_warrants_reload(vcs.repo(), paths))
     }
 
     fn retry_reload(&self) -> bool {
@@ -1231,16 +1313,16 @@ impl Mode for FilesMode {
     }
 
     fn reload(&mut self, viewport: Viewport, theme: &Theme) -> Result<bool, String> {
-        let Some(repo) = self.repo.as_ref() else {
+        let Some(vcs) = self.vcs.as_ref() else {
             return Ok(false);
         };
-        // `repo` borrows `self.repo`; the rest are disjoint fields.
+        // `vcs` borrows `self.vcs`; the rest are disjoint fields.
         let outcome = reload_working_tree(
             [&mut self.staged, &mut self.unstaged],
             &mut self.sidebar,
             &mut self.model,
             &mut self.last_input,
-            repo,
+            vcs,
             theme,
             viewport.height,
         );
@@ -1283,8 +1365,81 @@ impl Mode for FilesMode {
         let idx = self.sidebar.nearest_file_index()?;
         let file = &self.model.files.get(idx)?.file;
         let rel = crate::sidebar::display_path(file);
-        let workdir = self.repo.as_ref()?.workdir()?;
+        let workdir = self.vcs.as_ref()?.repo().workdir()?;
         Some(workdir.join(rel))
+    }
+}
+
+impl panel::Panel for FilesMode {
+    fn draw_side(
+        &mut self,
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        number: char,
+        focused: bool,
+        theme: &Theme,
+    ) {
+        self.sidebar_rect = area;
+        self.sidebar
+            .reveal_selected(area.height.saturating_sub(2) as usize);
+        let color = pane_border_color(focused, theme);
+        sidebar_pane::draw_sidebar(
+            frame,
+            area,
+            &self.sidebar,
+            panel_title(color, number, &self.label, theme),
+            sidebar_pane::sidebar_footer(&self.sidebar, theme),
+            focused,
+            theme,
+        );
+    }
+
+    fn draw_main(
+        &mut self,
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        focused: bool,
+        layout: ChangeLayout,
+        theme: &Theme,
+        budget: DrawBudget,
+    ) {
+        self.draw_diff(frame, area, layout, theme, budget, focused);
+    }
+
+    fn focus_main(&mut self, main: bool) {
+        self.focus = if main { Focus::Diff } else { Focus::Sidebar };
+    }
+
+    fn main_focused(&self) -> bool {
+        self.focus == Focus::Diff
+    }
+
+    fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand {
+        handle_key(self, key, height)
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent, height: usize) -> AppCommand {
+        handle_mouse(self, mouse, height)
+    }
+
+    fn background(&mut self, active: bool) -> BackgroundWork {
+        Mode::background(self, active)
+    }
+
+    fn reserves_key(&self, key: KeyCode) -> bool {
+        Mode::reserves_key(self, key)
+    }
+
+    fn captures_text_input(&self) -> bool {
+        Mode::captures_text_input(self)
+    }
+
+    fn report_copy(&mut self, result: Result<(), String>) {
+        Mode::report_copy(self, result);
+    }
+
+    fn selected_path(&self) -> Option<PathBuf> {
+        Mode::selected_path(self)
     }
 }
 
@@ -2079,21 +2234,6 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_tab_toggles_focus() {
-        let resolved = vec![ResolvedFile {
-            file: file_diff("a.txt"),
-            before: "a\n".to_string(),
-            after: "b\n".to_string(),
-        }];
-        let mut state = make_state(&resolved);
-        assert_eq!(state.focus, Focus::Sidebar);
-        handle_key(&mut state, KeyCode::Tab, 4);
-        assert_eq!(state.focus, Focus::Diff);
-        handle_key(&mut state, KeyCode::Tab, 4);
-        assert_eq!(state.focus, Focus::Sidebar);
-    }
-
-    #[test]
     fn pane_at_returns_correct_focus() {
         let resolved = vec![ResolvedFile {
             file: file_diff("a.txt"),
@@ -2161,10 +2301,15 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "world\n").unwrap();
         stage_all(&repo);
 
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
-        let input = wrapper.working_tree_diff().unwrap();
-        let model = build_model(&input, Some(&wrapper), std::collections::HashMap::new()).unwrap();
-        let expected = wrapper.workdir().unwrap().join("a.txt");
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
+        let input = wrapper.repo().working_tree_diff().unwrap();
+        let model = build_model(
+            &input,
+            Some(wrapper.repo()),
+            std::collections::HashMap::new(),
+        )
+        .unwrap();
+        let expected = wrapper.repo().workdir().unwrap().join("a.txt");
         let state = FilesMode::new(
             model,
             Patches::net(&input),
@@ -2193,7 +2338,7 @@ mod tests {
         commit_index(&raw, "initial");
         std::fs::write(dir.path().join("a.txt"), "after\n").unwrap();
         raw.blob(b"after\n").unwrap();
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         let (input, model) = FilesMode::try_model(&wrapper).unwrap();
         let theme = theme();
         let mut mode = FilesMode::new(model, input.clone(), Some(wrapper), &theme, 80);
@@ -2218,7 +2363,7 @@ mod tests {
         commit_index(&raw, "initial");
         std::fs::write(dir.path().join("a.txt"), "after\n").unwrap();
         raw.blob(b"after\n").unwrap();
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         let (input, model) = FilesMode::try_model(&wrapper).unwrap();
         let stages = model.stages.clone();
         let theme = theme();
@@ -2246,7 +2391,7 @@ mod tests {
         let path = raw.path().join(raw.head().unwrap().name().unwrap());
         let original = std::fs::read(&path).unwrap();
         std::fs::write(&path, "not-an-object-id\n").unwrap();
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         assert!(FilesMode::try_model(&wrapper).is_err());
         let theme = theme();
         let mut mode = FilesMode::loading(wrapper, &theme, 80);
@@ -2272,11 +2417,11 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "world\n").unwrap();
         stage_all(&repo);
 
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         let theme = Theme::default();
         let mut mode = FilesMode::loading(wrapper, &theme, 80);
 
-        assert!(mode.repo.is_some(), "loading mode must be reloadable");
+        assert!(mode.vcs.is_some(), "loading mode must be reloadable");
         assert!(mode.startup_pending, "loading mode is pending");
         assert!(mode.model.files.is_empty(), "loading mode has no files yet");
 
@@ -2304,7 +2449,7 @@ mod tests {
         stage_all(&repo);
         commit_index(&repo, "init");
 
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         let theme = Theme::default();
         let mut mode = FilesMode::loading(wrapper, &theme, 80);
 
@@ -2314,14 +2459,14 @@ mod tests {
             !mode.startup_pending,
             "a confirmed clean tree leaves Loading"
         );
-        assert!(mode.repo.is_some(), "a clean tree is still watchable");
+        assert!(mode.vcs.is_some(), "a clean tree is still watchable");
     }
 
     #[test]
     fn loading_mode_keeps_loading_on_failure_within_window() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         let theme = Theme::default();
         let mut mode = FilesMode::loading(wrapper, &theme, 80);
 
@@ -2333,14 +2478,14 @@ mod tests {
         );
         assert!(!changed);
         assert!(mode.startup_pending, "a fresh failure keeps Loading");
-        assert!(mode.repo.is_some(), "a fresh failure stays reloadable");
+        assert!(mode.vcs.is_some(), "a fresh failure stays reloadable");
     }
 
     #[test]
     fn loading_mode_degrades_to_error_after_window() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         let theme = Theme::default();
         let mut mode = FilesMode::loading(wrapper, &theme, 80);
 
@@ -2355,7 +2500,7 @@ mod tests {
         );
         assert!(changed, "the error state requires a repaint");
         assert!(
-            mode.repo.is_none(),
+            mode.vcs.is_none(),
             "a failure that persists past the window degrades to a static error"
         );
         assert!(

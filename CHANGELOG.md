@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add support for Kotlin.
+- TUI: a lazygit-style layout. Numbered panels for Files and Local branches stack on the left, and the main view on the right shows what the focused panel selects: a file's diff, a branch's log, or a commit's diff. Press `1` or `2` to focus a panel and `0` for the main view, and `Tab`/`Shift+Tab` (or `h`/`l`) to switch panels. `Enter` on a file focuses its diff, and on a branch or commit drills into its commits or files; `Esc` backs out. In the main view, `Tab` switches the staged and unstaged diff.
 - TUI: directory rows show an open-directory arrow.
 - TUI: fold and unfold directories in the Files sidebar with Enter.
 - TUI: add shortcuts to stage and discard changes in git.
@@ -21,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - review: hold Ctrl or Shift and scroll over the diff to step through the files in the sidebar, like the TUI.
 - TUI: the Files sidebar tags each file with its kind of change and an attention dot and mutes tests, comment-only changes, import-only changes, and lockfiles. Press `f` to hide low-value files. Tags end in `!` for changes that break callers. With `TYPESAFE_API_KEY` set, TypeSafe's Jev model judges every hunk, and hunk headers show its tag.
 - TUI: tag changes to agent instructions, skills, and prompt files as `agents`.
+- TUI: support GitButler workspaces. Files shows all uncommitted changes in one column, Branches lists GitButler's branches with applied ones first, and discard goes through `but`, so `but undo` brings changes back.
 
 ### Changed
 

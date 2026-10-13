@@ -1,3 +1,6 @@
+//! The git adapter's writes: stage, unstage, and discard through the
+//! index and the git CLI.
+
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -5,61 +8,7 @@ use std::process::{Command, Stdio};
 
 use git2::{Repository, Status, StatusOptions};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DiscardKind {
-    All,
-    Unstaged,
-}
-
-impl DiscardKind {
-    pub(super) const ALL: [Self; 2] = [Self::All, Self::Unstaged];
-
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::All => "Discard all changes",
-            Self::Unstaged => "Discard unstaged changes",
-        }
-    }
-
-    pub(super) fn description(self) -> &'static str {
-        match self {
-            Self::All => "Restore HEAD, including staged changes. Delete added files.",
-            Self::Unstaged => "Restore the index. Keep staged changes. Delete untracked files.",
-        }
-    }
-}
-
-pub(super) enum DiscardOutcome {
-    Applied(String),
-    Choose(PendingDiscard),
-}
-
-#[derive(Debug)]
-pub(super) struct PendingDiscard {
-    workdir: PathBuf,
-    targets: Vec<PathBuf>,
-    state: State,
-    choices: Vec<DiscardKind>,
-}
-
-impl PendingDiscard {
-    #[cfg(test)]
-    pub(super) fn choices(&self) -> &[DiscardKind] {
-        &self.choices
-    }
-
-    pub(super) fn is_available(&self, kind: DiscardKind) -> bool {
-        self.choices.contains(&kind)
-    }
-
-    pub(super) fn label(&self) -> String {
-        if self.state.changes.len() == 1 {
-            self.state.changes[0].display_path.display().to_string()
-        } else {
-            format!("{} selected files", self.state.changes.len())
-        }
-    }
-}
+use super::DiscardKind;
 
 #[derive(Debug, PartialEq, Eq)]
 struct Change {
@@ -76,8 +25,10 @@ struct FileState {
     worktree: Option<(u32, Option<git2::Oid>)>,
 }
 
+/// The changes of one selection, as read before a write. Comparing two
+/// reads tells whether the selection changed in between.
 #[derive(Debug, PartialEq, Eq)]
-struct State {
+pub(super) struct State {
     head: Option<git2::Oid>,
     changes: Vec<Change>,
     files: Vec<FileState>,
@@ -128,41 +79,50 @@ fn stage_changes(repo: &Repository, state: &State) -> Result<(), String> {
     git(workdir, &["add", "-A"], &paths)
 }
 
-pub(super) fn discard(workdir: &Path, targets: Vec<PathBuf>) -> Result<DiscardOutcome, String> {
-    let repo = open(workdir)?;
-    let state = read(&repo, &targets, true)?;
-    let mut choices = Vec::new();
-    if !state.changes.is_empty() {
-        choices.push(DiscardKind::All);
-    }
-    if state.changes.iter().any(|c| c.unstaged) {
-        choices.push(DiscardKind::Unstaged);
-    }
-    Ok(DiscardOutcome::Choose(PendingDiscard {
-        workdir: workdir.to_path_buf(),
-        targets,
-        state,
-        choices,
-    }))
+pub(super) fn read_selection(workdir: &Path, targets: &[PathBuf]) -> Result<State, String> {
+    read(&open(workdir)?, targets, true)
 }
 
-pub(super) fn complete_discard(
-    pending: PendingDiscard,
-    kind: DiscardKind,
-) -> Result<String, String> {
-    if !pending.is_available(kind) {
-        return Err("This discard action is unavailable".into());
+impl State {
+    pub(super) fn is_empty(&self) -> bool {
+        self.changes.is_empty()
     }
-    let repo = open(&pending.workdir)?;
-    if read(&repo, &pending.targets, true)? != pending.state {
-        return Err("Selection changed; press d again to review the current changes".into());
+
+    pub(super) fn has_unstaged(&self) -> bool {
+        self.changes.iter().any(|c| c.unstaged)
     }
-    apply(&repo, &pending.state, kind)?;
-    Ok(match kind {
-        DiscardKind::All => "Discarded all selected changes",
-        DiscardKind::Unstaged => "Discarded unstaged changes",
+
+    /// The menu's subject: the one file's path, or how many files.
+    pub(super) fn label(&self) -> String {
+        if self.changes.len() == 1 {
+            self.changes[0].display_path.display().to_string()
+        } else {
+            format!("{} selected files", self.changes.len())
+        }
     }
-    .into())
+
+    /// Every path each change touches, rename sources included.
+    pub(super) fn change_paths(&self) -> Vec<Vec<PathBuf>> {
+        self.changes
+            .iter()
+            .map(|c| c.paths.iter().cloned().collect())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn retained_hashes(&self) -> usize {
+        self.files
+            .iter()
+            .filter_map(|f| f.worktree.as_ref())
+            .filter_map(|(_, hash)| hash.as_ref())
+            .map(std::mem::size_of_val)
+            .sum()
+    }
+}
+
+/// Discard `state`'s changes the way `kind` says.
+pub(super) fn discard(workdir: &Path, state: &State, kind: DiscardKind) -> Result<(), String> {
+    apply(&open(workdir)?, state, kind)
 }
 
 fn open(workdir: &Path) -> Result<Repository, String> {
@@ -437,6 +397,3 @@ fn git(workdir: &Path, args: &[&str], paths: &BTreeSet<PathBuf>) -> Result<(), S
 fn message(error: git2::Error) -> String {
     error.message().to_string()
 }
-
-#[cfg(test)]
-mod tests;

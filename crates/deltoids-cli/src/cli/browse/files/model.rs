@@ -10,6 +10,7 @@ use deltoids::parse::{FileDiff, GitDiff};
 use deltoids::{Diff, LineKind, SymlinkView, content, git};
 
 use crate::cli::browse::comments::{CommentAnchor, DiffSection, Numbering, numbered_lines};
+use crate::cli::browse::vcs::{Columns, WorkingTree};
 use crate::sidebar::{ChangeKind, StageStatus, display_path};
 
 /// The owned data the TUI renders: resolved files plus their per-file
@@ -25,6 +26,8 @@ pub(super) struct Model {
     /// path (matching `display_path`). Empty without a repo,
     /// in which case the sidebar falls back to single-letter status.
     pub(super) stages: HashMap<String, StageStatus>,
+    /// Whether the working tree splits into staged and unstaged columns.
+    pub(super) columns: Columns,
 }
 
 /// Which staging column a diff pane shows.
@@ -64,6 +67,7 @@ impl Model {
             bodies: Vec::new(),
             splits: Vec::new(),
             stages: HashMap::new(),
+            columns: Columns::Split,
         }
     }
 
@@ -264,10 +268,17 @@ pub(super) fn build_model(
     finish_model(GitDiff::parse(input), repo, stages)
 }
 
+/// The model of one commit's patch: every side resolves from the
+/// object database, and there is no staging.
+pub(super) fn build_commit_model(patch: &str, repo: &git::Repo) -> Result<Model, String> {
+    finish_model(GitDiff::parse(patch), Some(repo), HashMap::new())
+}
+
 pub(super) fn build_working_model(
-    snapshot: &git::WorkingTreeSnapshot,
+    working: &WorkingTree,
     repo: &git::Repo,
 ) -> Result<Model, String> {
+    let snapshot = &working.snapshot;
     let mut parsed = GitDiff::parse(&snapshot.patch);
     let mut deleted_paths: HashMap<_, _> = parsed
         .files
@@ -320,6 +331,7 @@ pub(super) fn build_working_model(
     });
     let mut model = finish_model(parsed, Some(repo), stage_map(&snapshot.stages))?;
     model.splits = split_bodies(snapshot, repo, &model.files)?;
+    model.columns = working.columns;
     Ok(model)
 }
 
@@ -426,6 +438,7 @@ fn finish_model(
         files,
         bodies,
         stages,
+        columns: Columns::Split,
     })
 }
 
@@ -788,6 +801,14 @@ mod tests {
         git_cli(dir, &["commit", "-qm", "init"]);
     }
 
+    /// A git working tree: staged and unstaged columns.
+    fn split(snapshot: git::WorkingTreeSnapshot) -> WorkingTree {
+        WorkingTree {
+            snapshot,
+            columns: Columns::Split,
+        }
+    }
+
     /// Build the working model for `dir`, keeping working-tree content
     /// resolvable without depending on the process cwd.
     fn working_model(dir: &std::path::Path) -> Model {
@@ -795,7 +816,7 @@ mod tests {
         raw.blob(&std::fs::read(dir.join("secret.txt")).unwrap())
             .unwrap();
         let repo = git::Repo::discover_at(dir).unwrap();
-        build_working_model(&repo.working_tree_snapshot().unwrap(), &repo).unwrap()
+        build_working_model(&split(repo.working_tree_snapshot().unwrap()), &repo).unwrap()
     }
 
     fn secret_body(model: &Model) -> (&ResolvedFile, &FileBody) {
@@ -845,7 +866,7 @@ mod tests {
         // The working-tree plaintext is neither in the ODB nor readable
         // from the process cwd, so the after side cannot be resolved.
         let repo = git::Repo::discover_at(dir.path()).unwrap();
-        let model = build_working_model(&repo.working_tree_snapshot().unwrap(), &repo)
+        let model = build_working_model(&split(repo.working_tree_snapshot().unwrap()), &repo)
             .expect("unresolvable filtered file must not error");
         let (_, body) = secret_body(&model);
 
@@ -920,8 +941,8 @@ mod tests {
         repo.blob(b"b edited\n").unwrap();
 
         let wrapper = git::Repo::discover_at(dir.path()).unwrap();
-        let model =
-            build_working_model(&wrapper.working_tree_snapshot().unwrap(), &wrapper).unwrap();
+        let model = build_working_model(&split(wrapper.working_tree_snapshot().unwrap()), &wrapper)
+            .unwrap();
         let a = model
             .files
             .iter()
