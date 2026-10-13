@@ -1,7 +1,9 @@
 //! Read-only history: local branches, the commits reachable from one, and
 //! the patch a commit introduces.
 
-use git2::{BranchType, DiffFindOptions, DiffFormat, DiffOptions, Oid, Repository, Sort};
+use std::collections::{BinaryHeap, HashSet};
+
+use git2::{BranchType, DiffFindOptions, DiffFormat, DiffOptions, Oid, Repository};
 
 use super::Repo;
 
@@ -63,7 +65,9 @@ impl Repo {
     }
 
     /// Up to `limit` commits reachable from `rev` (a branch name or any
-    /// revision), newest first.
+    /// revision), newest commit date first, as `git log` lists them. Reads
+    /// only the commits it returns and their parents, so the cost follows
+    /// `limit`, whatever the size of the history.
     pub fn commits(&self, rev: &str, limit: usize) -> Result<Vec<Commit>, String> {
         let error = |e: git2::Error| format!("failed to read commits of {rev}: {e}");
         let start = self
@@ -71,16 +75,21 @@ impl Repo {
             .revparse_single(rev)
             .and_then(|object| object.peel_to_commit())
             .map_err(error)?;
-        let mut walk = self.0.revwalk().map_err(error)?;
-        walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)
-            .map_err(error)?;
-        walk.push(start.id()).map_err(error)?;
-        walk.take(limit)
-            .map(|id| {
-                let commit = self.0.find_commit(id.map_err(error)?).map_err(error)?;
-                Ok(commit_of(&commit))
-            })
-            .collect()
+        let mut seen = HashSet::from([start.id()]);
+        let mut queue = BinaryHeap::from([(start.time().seconds(), start.id())]);
+        let mut commits = Vec::new();
+        while commits.len() < limit {
+            let Some((_, id)) = queue.pop() else {
+                break;
+            };
+            let commit = self.0.find_commit(id).map_err(error)?;
+            for parent in commit.parent_ids().filter(|id| seen.insert(*id)) {
+                let time = self.0.find_commit(parent).map_err(error)?.time();
+                queue.push((time.seconds(), parent));
+            }
+            commits.push(commit_of(&commit));
+        }
+        Ok(commits)
     }
 
     /// The patch commit `id` introduces against its first parent (every

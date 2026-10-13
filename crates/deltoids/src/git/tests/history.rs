@@ -1,5 +1,5 @@
 use super::*;
-use git2::{BranchType, Signature, Time};
+use git2::{BranchType, Oid, Signature, Time};
 
 /// Write `files` into the working tree, stage them, and commit on `HEAD`
 /// at `seconds` since the epoch, so recency ordering is deterministic.
@@ -124,6 +124,62 @@ fn commits_stop_at_the_limit() {
 
     let summaries: Vec<_> = commits.iter().map(|c| c.summary.as_str()).collect();
     assert_eq!(summaries, ["c4", "c3"]);
+}
+
+/// Commit `HEAD`'s tree on `parents` at `seconds`, moving no ref.
+fn commit_on(repo: &Repository, parents: &[Oid], msg: &str, seconds: i64) -> Oid {
+    let tree = repo.head().unwrap().peel_to_tree().unwrap();
+    let sig = Signature::new("Ada Lovelace", "ada@example.com", &Time::new(seconds, 0)).unwrap();
+    let parents: Vec<_> = parents
+        .iter()
+        .map(|id| repo.find_commit(*id).unwrap())
+        .collect();
+    let parents: Vec<_> = parents.iter().collect();
+    repo.commit(None, &sig, &sig, msg, &tree, &parents).unwrap()
+}
+
+/// A branch `merged` whose two lines of work interleave in time:
+/// `base` 100, `side 1` 200, `main 2` 300, `side 3` 400, `main 4` 500,
+/// and the merge 600.
+fn interleaved_merge(dir: &Path) -> Repository {
+    let raw = init_repo(dir);
+    commit_at(dir, &raw, &[("a.txt", "a\n")], "base", 100);
+    let base = raw.head().unwrap().target().unwrap();
+    let side1 = commit_on(&raw, &[base], "side 1", 200);
+    let main2 = commit_on(&raw, &[base], "main 2", 300);
+    let side3 = commit_on(&raw, &[side1], "side 3", 400);
+    let main4 = commit_on(&raw, &[main2], "main 4", 500);
+    let merge = commit_on(&raw, &[main4, side3], "merge", 600);
+    raw.reference("refs/heads/merged", merge, false, "test")
+        .unwrap();
+    raw
+}
+
+#[test]
+fn commits_list_merged_history_newest_first_each_once() {
+    let dir = tempfile::tempdir().unwrap();
+    interleaved_merge(dir.path());
+
+    let repo = Repo::discover_at(dir.path()).unwrap();
+    let commits = repo.commits("merged", 10).unwrap();
+
+    let summaries: Vec<_> = commits.iter().map(|c| c.summary.as_str()).collect();
+    assert_eq!(
+        summaries,
+        ["merge", "main 4", "side 3", "main 2", "side 1", "base"]
+    );
+}
+
+#[test]
+fn commits_stop_at_the_limit_across_merges() {
+    let dir = tempfile::tempdir().unwrap();
+    interleaved_merge(dir.path());
+
+    let repo = Repo::discover_at(dir.path()).unwrap();
+    let commits = repo.commits("merged", 3).unwrap();
+
+    let summaries: Vec<_> = commits.iter().map(|c| c.summary.as_str()).collect();
+    assert_eq!(summaries, ["merge", "main 4", "side 3"]);
 }
 
 #[test]
