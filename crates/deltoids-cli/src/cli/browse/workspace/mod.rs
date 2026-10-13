@@ -1,17 +1,16 @@
 //! The root mode the shell drives: lazygit's layout.
 //!
-//! The left column stacks four numbered side panels; the right pane is
+//! The left column stacks three numbered side panels; the right pane is
 //! the main view `[0]`, showing whatever the current side panel drives:
 //!
 //! 1. Status: `repo → branch`; main shows a repository summary.
 //! 2. Files: the working-tree file tree; main shows its diff.
 //! 3. Local branches: main shows the selected branch's log. Drills down
-//!    into a branch's commits and a commit's files.
-//! 4. Commits: the checked-out branch's commits; main shows the selected
-//!    commit's diff. Drills down into a commit's files.
+//!    into a branch's commits (main: the selected commit's diff) and a
+//!    commit's files.
 //!
 //! Focus is on one side panel or on the main view. The focused side
-//! panel takes the larger share of the column. `1`–`4` focus a side
+//! panel takes the larger share of the column. `1`–`3` focus a side
 //! panel, `0` the main view; `h`/`l` (and the arrows) step between side
 //! panels; `Tab` swaps between a side panel and the main view, and `Esc`
 //! leaves the main view. Every other key goes to the current panel,
@@ -46,11 +45,10 @@ enum Side {
     Status,
     Files,
     Branches,
-    Commits,
 }
 
 impl Side {
-    const ALL: [Side; 4] = [Side::Status, Side::Files, Side::Branches, Side::Commits];
+    const ALL: [Side; 3] = [Side::Status, Side::Files, Side::Branches];
 
     fn index(self) -> usize {
         Self::ALL
@@ -80,7 +78,6 @@ impl Side {
             Side::Status => "Status",
             Side::Files => "Files",
             Side::Branches => "Local branches",
-            Side::Commits => "Commits",
         }
     }
 }
@@ -89,11 +86,10 @@ pub(super) struct Workspace {
     status: Status,
     files: FilesMode,
     branches: Option<History>,
-    commits: Option<History>,
     /// The side panel that drives the main view.
     side: Side,
     main_focused: bool,
-    side_rects: [Rect; 4],
+    side_rects: [Rect; 3],
     main_rect: Rect,
 }
 
@@ -103,10 +99,9 @@ impl Workspace {
             status: Status::default(),
             files,
             branches: None,
-            commits: None,
             side: Side::Files,
             main_focused: false,
-            side_rects: [Rect::default(); 4],
+            side_rects: [Rect::default(); 3],
             main_rect: Rect::default(),
         };
         workspace.open_repository();
@@ -120,7 +115,6 @@ impl Workspace {
         let open = || dir.as_deref().and_then(git::Repo::discover_at);
         self.status = Status::open(open());
         self.branches = open().map(History::branches);
-        self.commits = open().map(History::log);
     }
 
     fn panel(&mut self, side: Side) -> Option<&mut dyn Panel> {
@@ -128,7 +122,6 @@ impl Workspace {
             Side::Status => Some(&mut self.status),
             Side::Files => Some(&mut self.files),
             Side::Branches => self.branches.as_mut().map(|h| h as &mut dyn Panel),
-            Side::Commits => self.commits.as_mut().map(|h| h as &mut dyn Panel),
         }
     }
 
@@ -137,7 +130,6 @@ impl Workspace {
             Side::Status => Some(&self.status),
             Side::Files => Some(&self.files),
             Side::Branches => self.branches.as_ref().map(|h| h as &dyn Panel),
-            Side::Commits => self.commits.as_ref().map(|h| h as &dyn Panel),
         }
     }
 
@@ -239,7 +231,7 @@ impl Mode for Workspace {
     }
 
     fn reserves_key(&self, key: KeyCode) -> bool {
-        matches!(key, KeyCode::Char('0'..='4' | 'h' | 'l'))
+        matches!(key, KeyCode::Char('0'..='3' | 'h' | 'l'))
             || self
                 .panel_ref(self.side)
                 .is_some_and(|panel| panel.reserves_key(key))
@@ -310,11 +302,8 @@ impl Mode for Workspace {
     fn reload(&mut self, viewport: Viewport, theme: &Theme) -> Result<bool, String> {
         let changed = self.files.reload(viewport, theme)?;
         self.status.refresh();
-        for history in [&mut self.branches, &mut self.commits]
-            .into_iter()
-            .flatten()
-        {
-            history.refresh();
+        if let Some(branches) = &mut self.branches {
+            branches.refresh();
         }
         Ok(changed || self.branches.is_some())
     }
@@ -328,7 +317,7 @@ impl Mode for Workspace {
 /// Split the left column into the side panels: Status takes one line;
 /// the others share the rest, with the current panel taking the larger
 /// share.
-fn side_layout(area: Rect, current: Side) -> [Rect; 4] {
+fn side_layout(area: Rect, current: Side) -> [Rect; 3] {
     let weight = |side| if side == current { 2 } else { 1 };
     let rects = Layout::default()
         .direction(Direction::Vertical)
@@ -336,10 +325,9 @@ fn side_layout(area: Rect, current: Side) -> [Rect; 4] {
             Constraint::Length(3),
             Constraint::Fill(weight(Side::Files)),
             Constraint::Fill(weight(Side::Branches)),
-            Constraint::Fill(weight(Side::Commits)),
         ])
         .split(area);
-    [rects[0], rects[1], rects[2], rects[3]]
+    [rects[0], rects[1], rects[2]]
 }
 
 fn inner_height(area: Rect) -> usize {

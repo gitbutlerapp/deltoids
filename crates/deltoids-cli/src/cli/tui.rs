@@ -15,19 +15,19 @@ on the right showing what the focused panel selects.
 Panels:
 - [1] Status:      repository and checked-out branch
 - [2] Files:       working-tree changes; main shows their diff
-- [3] Local branches: main shows the selected branch's log
-- [4] Commits:     the checked-out branch's commits; main shows the
-                   selected commit's diff
+- [3] Local branches: main shows the selected branch's log; Enter lists
+                   the branch's commits, and main shows the selected
+                   commit's diff
 
 Keys:
-- 1-4 / 0:         focus a side panel / the main view
+- 1-3 / 0:         focus a side panel / the main view
 - h / l, arrows:   previous / next side panel
 - Tab / Esc:       swap side panel and main view / leave the main view
 - j / k:           move within the focused panel (between diff lines in
                    the main view)
 - Enter:           drill down: a branch's commits, then a commit's files
                    and diff
-- Esc:             back up one step in Local branches or Commits
+- Esc:             back up one step in Local branches
 - Shift+J / K:     scroll the diff pane
 - PgUp / PgDn:     page the focused pane
 - < / >:           narrow / widen the sidebar (or drag the divider)

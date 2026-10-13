@@ -1,19 +1,13 @@
-//! History panels: local branches and commits, in the spirit of
-//! lazygit's branches and commits panels.
+//! The local-branches panel, in the spirit of lazygit's.
 //!
-//! One [`History`] backs each panel, starting from a different root:
-//!
-//! - [`History::branches`] lists every local branch, the checked-out one
-//!   first; the main view shows the selected branch's log. `Enter` lists
-//!   the branch's commits in the same panel.
-//! - [`History::log`] lists the checked-out branch's commits.
-//!
-//! From a commit list, newest first and loaded a page at a time, the
-//! main view previews the selected commit's diff, and `Enter` opens the
-//! commit in the panel as a read-only [`FilesMode`]: its file tree in the
-//! panel and its diff in the main view, with every diff-pane feature
-//! (cursor, comments, hunk reshaping) but no staging. `Esc` steps back
-//! up to the root; each step keeps its selection.
+//! [`History`] lists every local branch, the checked-out one first; the
+//! main view shows the selected branch's log. `Enter` lists the branch's
+//! commits in the same panel, newest first and loaded a page at a time,
+//! and the main view previews the selected commit's diff. `Enter` again
+//! opens the commit in the panel as a read-only [`FilesMode`]: its file
+//! tree in the panel and its diff in the main view, with every diff-pane
+//! feature (cursor, comments, hunk reshaping) but no staging. `Esc` steps
+//! back up to the branches; each step keeps its selection.
 //!
 //! The lists are a snapshot; [`History::refresh`] re-reads them and keeps
 //! each selection on the same branch or commit.
@@ -128,8 +122,6 @@ struct Chrome {
 
 pub(super) struct History {
     repo: git::Repo,
-    /// The step `Esc` stops at.
-    root: Screen,
     screen: Screen,
     main_focused: bool,
     branches: Result<Vec<git::Branch>, String>,
@@ -152,26 +144,10 @@ pub(super) struct History {
 impl History {
     /// The local-branches panel.
     pub(super) fn branches(repo: git::Repo) -> Self {
-        Self::new(repo, Screen::Branches)
-    }
-
-    /// The commits panel: the checked-out branch's commits.
-    pub(super) fn log(repo: git::Repo) -> Self {
-        let mut history = Self::new(repo, Screen::Commits);
-        history.commits = Some(CommitList::load(
-            &history.repo,
-            "HEAD".to_string(),
-            "Commits".to_string(),
-        ));
-        history
-    }
-
-    fn new(repo: git::Repo, root: Screen) -> Self {
         Self {
             branches: repo.local_branches(),
             repo,
-            root,
-            screen: root,
+            screen: Screen::Branches,
             main_focused: false,
             branch_cursor: Cursor::default(),
             logs: HashMap::new(),
@@ -284,9 +260,7 @@ impl History {
             Screen::Commit => Screen::Commits,
             Screen::Commits | Screen::Branches => Screen::Branches,
         };
-        if self.screen != self.root {
-            self.set_screen(up);
-        }
+        self.set_screen(up);
     }
 
     fn move_list(&mut self, key: KeyCode, height: usize) {

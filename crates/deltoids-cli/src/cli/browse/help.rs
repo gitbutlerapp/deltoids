@@ -20,7 +20,7 @@ use super::mode::AppCommand;
 /// table inside the popup.
 pub(super) const HELP_KEYS: &[(&str, &str)] = &[
     ("?", "toggle this help"),
-    ("1-4 / 0", "focus a side panel / the main view"),
+    ("1-3 / 0", "focus a side panel / the main view"),
     ("h / l", "previous / next side panel"),
     ("Tab", "swap side panel and main view"),
     ("Enter / Esc", "drill into / back out (branches, commits)"),

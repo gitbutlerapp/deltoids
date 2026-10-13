@@ -100,7 +100,7 @@ crates/
         mod.rs               #     panel stack, keys, mouse, reload
         status.rs            #     [1] Status panel
         tests.rs             #     layout and navigation tests
-      history/               #   [3] branches / [4] commits panels
+      history/               #   [3] Local branches panel
         mod.rs               #     drill-down to a commit's files, list rendering
         cursor.rs            #     list selection + scroll
       files/                 #   FilesMode (working-tree diff; read-only commit view)

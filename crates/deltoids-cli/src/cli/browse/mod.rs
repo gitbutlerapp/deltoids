@@ -2,7 +2,7 @@
 //!
 //! A lazygit-style layout: numbered side panels stacked in the left column
 //! (status, the working-tree files of [`files::FilesMode`], and the local
-//! branches and commits of [`history::History`]) and the main view on the
+//! branches of [`history::History`]) and the main view on the
 //! right. [`workspace::Workspace`] lays them out and routes input; each
 //! panel sits behind [`panel::Panel`].
 //!

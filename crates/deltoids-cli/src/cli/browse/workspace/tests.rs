@@ -137,7 +137,7 @@ fn panel_height(workspace: &mut Workspace, n: char) -> usize {
 
 /// The side panel with the most rows: the focused one.
 fn tallest(workspace: &mut Workspace) -> char {
-    ['1', '2', '3', '4']
+    ['1', '2', '3']
         .into_iter()
         .max_by_key(|&n| panel_height(workspace, n))
         .unwrap()
@@ -148,22 +148,19 @@ fn side_panels_stack_in_lazygit_order_beside_the_main_view() {
     let dir = fixture();
     let mut workspace = workspace(dir.path());
 
-    let titles: Vec<_> = [
-        "[1]─Status",
-        "[2]─Files",
-        "[3]─Local branches",
-        "[4]─Commits",
-    ]
-    .iter()
-    .map(|title| {
-        left_rows(&mut workspace)
-            .iter()
-            .position(|row| row.contains(title))
-            .unwrap_or_else(|| panic!("{title} missing"))
-    })
-    .collect();
+    let titles: Vec<_> = ["[1]─Status", "[2]─Files", "[3]─Local branches"]
+        .iter()
+        .map(|title| {
+            left_rows(&mut workspace)
+                .iter()
+                .position(|row| row.contains(title))
+                .unwrap_or_else(|| panic!("{title} missing"))
+        })
+        .collect();
 
     assert!(titles.is_sorted(), "{titles:?}");
+    let left = left_text(&mut workspace);
+    assert!(!left.contains("[4]"), "{left}");
     let right = right_text(&mut workspace);
     assert!(right.lines().next().unwrap().contains("[0]"), "{right}");
 }
@@ -203,11 +200,14 @@ fn the_branches_panel_lists_local_branches_checked_out_first() {
 }
 
 #[test]
-fn the_commits_panel_lists_the_checked_out_branch_newest_first() {
+fn enter_lists_a_branch_commits_newest_first() {
     let dir = fixture();
     let mut workspace = workspace(dir.path());
 
-    let commits = panel(&mut workspace, '4');
+    press(&mut workspace, &[KeyCode::Char('3'), KeyCode::Enter]);
+
+    let commits = panel(&mut workspace, '3');
+    assert!(commits.contains("Commits (main)"), "{commits}");
 
     let newest = commits.find("shout greeting").expect("head listed");
     let oldest = commits.find("add greeting").expect("root listed");
@@ -220,10 +220,13 @@ fn number_keys_focus_side_panels_and_the_focused_one_grows() {
     let dir = fixture();
     let mut workspace = workspace(dir.path());
 
-    for n in ['3', '4', '2'] {
+    for n in ['3', '2'] {
         press(&mut workspace, &[KeyCode::Char(n)]);
         assert_eq!(tallest(&mut workspace), n);
     }
+    // There is no fourth panel.
+    press(&mut workspace, &[KeyCode::Char('4')]);
+    assert_eq!(tallest(&mut workspace), '2');
 }
 
 #[test]
@@ -233,12 +236,12 @@ fn h_and_l_cycle_through_the_side_panels() {
 
     press(&mut workspace, &[KeyCode::Char('l')]);
     assert_eq!(tallest(&mut workspace), '3');
-    // Commits, then past the last panel round to Status, and back.
+    // Past the last panel round to Status, then on to Files.
     press(&mut workspace, &[KeyCode::Right, KeyCode::Char('l')]);
-    press(&mut workspace, &[KeyCode::Char('h')]);
-    assert_eq!(tallest(&mut workspace), '4');
-    press(&mut workspace, &[KeyCode::Left, KeyCode::Left]);
     assert_eq!(tallest(&mut workspace), '2');
+    // And back the other way, round past Status.
+    press(&mut workspace, &[KeyCode::Char('h'), KeyCode::Left]);
+    assert_eq!(tallest(&mut workspace), '3');
 }
 
 #[test]
@@ -258,11 +261,11 @@ fn the_main_view_shows_the_focused_branch_log() {
 }
 
 #[test]
-fn the_main_view_shows_the_focused_commit_diff() {
+fn the_main_view_shows_the_selected_commit_diff() {
     let dir = fixture();
     let mut workspace = workspace(dir.path());
 
-    press(&mut workspace, &[KeyCode::Char('4')]);
+    press(&mut workspace, &[KeyCode::Char('3'), KeyCode::Enter]);
     let right = right_text(&mut workspace);
     assert!(right.contains("HELLO"), "{right}");
 
@@ -310,26 +313,13 @@ fn feature_tip(dir: &Path) -> String {
 }
 
 #[test]
-fn enter_on_a_commit_opens_its_files_in_the_commits_panel() {
-    let dir = fixture();
-    let mut workspace = workspace(dir.path());
-    press(&mut workspace, &[KeyCode::Char('4'), KeyCode::Enter]);
-
-    let files = panel(&mut workspace, '4');
-    assert!(files.contains("Commit "), "{files}");
-    assert!(files.contains("greet.rs"), "{files}");
-    assert!(right_text(&mut workspace).contains("HELLO"));
-
-    press(&mut workspace, &[KeyCode::Esc]);
-    let commits = panel(&mut workspace, '4');
-    assert!(commits.contains("shout greeting"), "{commits}");
-}
-
-#[test]
 fn zero_focuses_the_main_view_and_esc_returns_to_the_side() {
     let dir = fixture();
     let mut workspace = workspace(dir.path());
-    press(&mut workspace, &[KeyCode::Char('4'), KeyCode::Char('0')]);
+    press(
+        &mut workspace,
+        &[KeyCode::Char('3'), KeyCode::Enter, KeyCode::Char('0')],
+    );
 
     // `j` walks the diff, not the commit list.
     press(&mut workspace, &[KeyCode::Char('j')]);
@@ -394,9 +384,10 @@ fn panel_keys_are_reserved_over_custom_commands() {
     let dir = fixture();
     let workspace = workspace(dir.path());
 
-    for key in ['0', '1', '2', '3', '4', 'h', 'l'] {
+    for key in ['0', '1', '2', '3', 'h', 'l'] {
         assert!(workspace.reserves_key(KeyCode::Char(key)), "{key}");
     }
+    assert!(!workspace.reserves_key(KeyCode::Char('4')));
 }
 
 #[test]
@@ -405,14 +396,14 @@ fn outside_a_repository_the_history_panels_say_so() {
     let mut workspace = workspace(dir.path());
 
     assert!(panel(&mut workspace, '3').contains("Not a git repository"));
-    assert!(panel(&mut workspace, '4').contains("Not a git repository"));
 }
 
 #[test]
 fn a_reload_picks_up_new_commits_and_branches() {
     let dir = fixture();
     let mut workspace = workspace(dir.path());
-    assert!(!panel(&mut workspace, '4').contains("say hi"));
+    press(&mut workspace, &[KeyCode::Char('3')]);
+    assert!(!right_text(&mut workspace).contains("say hi"));
     let repo = Repository::open(dir.path()).unwrap();
     commit(dir.path(), &repo, &[], "say hi", 400);
     let head = repo.head().unwrap().peel_to_commit().unwrap();
@@ -424,6 +415,7 @@ fn a_reload_picks_up_new_commits_and_branches() {
     };
     workspace.reload(viewport, &Theme::default()).unwrap();
 
-    assert!(panel(&mut workspace, '4').contains("say hi"));
+    // The checked-out branch's log, in the main view.
+    assert!(right_text(&mut workspace).contains("say hi"));
     assert!(panel(&mut workspace, '3').contains("fresh"));
 }
