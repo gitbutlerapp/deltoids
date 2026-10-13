@@ -830,6 +830,18 @@ fn handle_key(state: &mut FilesMode, key: KeyCode, height: usize) -> AppCommand 
             state.toggle_column();
             AppCommand::Continue
         }
+        // In the diff, Tab switches staged and unstaged like `s`.
+        KeyCode::Tab | KeyCode::BackTab if state.focus == Focus::Diff => {
+            state.toggle_column();
+            AppCommand::Continue
+        }
+        // Enter on a file opens its diff; on a directory it folds.
+        KeyCode::Enter
+            if state.focus == Focus::Sidebar && state.sidebar.selected_file_index().is_some() =>
+        {
+            state.focus = Focus::Diff;
+            AppCommand::Continue
+        }
         KeyCode::Char('z') => {
             match state.focus {
                 Focus::Diff => reshape_hunk(state, Diff::expand),
@@ -1208,7 +1220,7 @@ impl Mode for FilesMode {
     ) {
         let (sidebar_focused, diff_focused) =
             (self.focus == Focus::Sidebar, self.focus == Focus::Diff);
-        panel::Panel::draw_side(self, frame, left, '2', sidebar_focused, theme);
+        panel::Panel::draw_side(self, frame, left, '1', sidebar_focused, theme);
         self.draw_diff(frame, right, layout, theme, budget, diff_focused);
     }
 
@@ -1353,6 +1365,10 @@ impl panel::Panel for FilesMode {
 
     fn focus_main(&mut self, main: bool) {
         self.focus = if main { Focus::Diff } else { Focus::Sidebar };
+    }
+
+    fn main_focused(&self) -> bool {
+        self.focus == Focus::Diff
     }
 
     fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand {

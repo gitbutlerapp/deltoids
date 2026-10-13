@@ -1,25 +1,23 @@
 //! The root mode the shell drives: lazygit's layout.
 //!
-//! The left column stacks three numbered side panels; the right pane is
-//! the main view `[0]`, showing whatever the current side panel drives:
+//! The left column stacks two numbered side panels; the right pane is the
+//! main view `[0]`, showing whatever the current side panel drives:
 //!
-//! 1. Status: `repo → branch`; main shows a repository summary.
-//! 2. Files: the working-tree file tree; main shows its diff.
-//! 3. Local branches: main shows the selected branch's log. Drills down
+//! 1. Files: the working-tree file tree; main shows its diff.
+//! 2. Local branches: main shows the selected branch's log. Drills down
 //!    into a branch's commits (main: the selected commit's diff) and a
 //!    commit's files.
 //!
-//! Focus is on one side panel or on the main view. The focused side
-//! panel takes the larger share of the column. `1`–`3` focus a side
-//! panel, `0` the main view; `h`/`l` (and the arrows) step between side
-//! panels; `Tab` swaps between a side panel and the main view, and `Esc`
-//! leaves the main view. Every other key goes to the current panel,
-//! which owns both of its halves through the [`Panel`] seam.
+//! Focus is on one side panel or on the main view. The current side
+//! panel takes the larger share of the column. `1`/`2` focus a side
+//! panel and `0` the main view; `Tab`/`Shift+Tab`, `h`/`l`, and the
+//! arrows switch side panels. `Enter` on a file focuses its diff, and
+//! `Esc` leaves the main view. Every other key, `Tab` in the main view
+//! included, goes to the current panel, which owns both of its halves
+//! through the [`Panel`] seam.
 //!
 //! The working tree is the one watched source. A reload rebuilds its
-//! diff and re-reads the history panels and the status line.
-
-mod status;
+//! diff and re-reads the branches.
 
 use std::path::PathBuf;
 
@@ -37,18 +35,16 @@ use super::history::History;
 use super::mode::{AppCommand, BackgroundWork, DrawBudget, Mode, Viewport};
 use super::panel::{Panel, panel_title};
 use super::watch::ChangeReceiver;
-use status::Status;
 
 /// The side panels, top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
-    Status,
     Files,
     Branches,
 }
 
 impl Side {
-    const ALL: [Side; 3] = [Side::Status, Side::Files, Side::Branches];
+    const ALL: [Side; 2] = [Side::Files, Side::Branches];
 
     fn index(self) -> usize {
         Self::ALL
@@ -71,55 +67,44 @@ impl Side {
         let len = Self::ALL.len() as isize;
         Self::ALL[(self.index() as isize + step).rem_euclid(len) as usize]
     }
-
-    /// The title a history panel shows when there is no repository.
-    fn label(self) -> &'static str {
-        match self {
-            Side::Status => "Status",
-            Side::Files => "Files",
-            Side::Branches => "Local branches",
-        }
-    }
 }
 
 pub(super) struct Workspace {
-    status: Status,
     files: FilesMode,
     branches: Option<History>,
     /// The side panel that drives the main view.
     side: Side,
     main_focused: bool,
-    side_rects: [Rect; 3],
+    side_rects: [Rect; 2],
     main_rect: Rect,
 }
 
 impl Workspace {
     pub(super) fn new(files: FilesMode) -> Self {
         let mut workspace = Self {
-            status: Status::default(),
             files,
             branches: None,
             side: Side::Files,
             main_focused: false,
-            side_rects: [Rect::default(); 3],
+            side_rects: [Rect::default(); 2],
             main_rect: Rect::default(),
         };
         workspace.open_repository();
         workspace
     }
 
-    /// Open the status and history panels on the working tree's
-    /// repository; without one they say so.
+    /// Open the branches panel on the working tree's repository; without
+    /// one it says so.
     fn open_repository(&mut self) {
-        let dir = self.files.repo_dir();
-        let open = || dir.as_deref().and_then(git::Repo::discover_at);
-        self.status = Status::open(open());
-        self.branches = open().map(History::branches);
+        self.branches = self
+            .files
+            .repo_dir()
+            .and_then(|dir| git::Repo::discover_at(&dir))
+            .map(History::branches);
     }
 
     fn panel(&mut self, side: Side) -> Option<&mut dyn Panel> {
         match side {
-            Side::Status => Some(&mut self.status),
             Side::Files => Some(&mut self.files),
             Side::Branches => self.branches.as_mut().map(|h| h as &mut dyn Panel),
         }
@@ -127,7 +112,6 @@ impl Workspace {
 
     fn panel_ref(&self, side: Side) -> Option<&dyn Panel> {
         match side {
-            Side::Status => Some(&self.status),
             Side::Files => Some(&self.files),
             Side::Branches => self.branches.as_ref().map(|h| h as &dyn Panel),
         }
@@ -140,6 +124,18 @@ impl Workspace {
         if let Some(panel) = self.panel(side) {
             panel.focus_main(main);
         }
+    }
+
+    /// Hand a key to the current panel, then follow any focus move it
+    /// made on its own.
+    fn forward_key(&mut self, key: KeyCode, height: usize) -> AppCommand {
+        let side = self.side;
+        let Some(panel) = self.panel(side) else {
+            return AppCommand::Continue;
+        };
+        let command = panel.handle_key(key, height);
+        self.main_focused = panel.main_focused();
+        command
     }
 
     /// Inner height of the half with focus; `main` is the main view's.
@@ -189,23 +185,20 @@ impl Mode for Workspace {
             match self.panel(side) {
                 Some(panel) => panel.draw_side(frame, area, side.number(), focused, theme),
                 None => {
-                    draw_no_repository(frame, area, side.number(), side.label(), focused, theme)
+                    draw_no_repository(frame, area, side.number(), "Local branches", focused, theme)
                 }
             }
         }
         match self.panel(current) {
             Some(panel) => panel.draw_main(frame, right, main_focused, layout, theme, budget),
-            None => draw_no_repository(frame, right, '0', "Main", main_focused, theme),
+            None => draw_no_repository(frame, right, '0', "Log", main_focused, theme),
         }
     }
 
     fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand {
-        let panel_height = self.focused_height(height);
+        let height = self.focused_height(height);
         if self.captures_text_input() {
-            let side = self.side;
-            return self.panel(side).map_or(AppCommand::Continue, |panel| {
-                panel.handle_key(key, panel_height)
-            });
+            return self.forward_key(key, height);
         }
         let side = self.side;
         match key {
@@ -213,25 +206,20 @@ impl Mode for Workspace {
             KeyCode::Char(n) if Side::from_number(n).is_some() => {
                 self.focus(Side::from_number(n).expect("checked by guard"), false);
             }
-            KeyCode::Tab | KeyCode::BackTab => self.focus(side, !self.main_focused),
             KeyCode::Esc if self.main_focused => self.focus(side, false),
-            KeyCode::Char('h') | KeyCode::Left if !self.main_focused => {
-                self.focus(side.step(-1), false);
-            }
-            KeyCode::Char('l') | KeyCode::Right if !self.main_focused => {
+            KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right if !self.main_focused => {
                 self.focus(side.step(1), false);
             }
-            _ => {
-                return self.panel(side).map_or(AppCommand::Continue, |panel| {
-                    panel.handle_key(key, panel_height)
-                });
+            KeyCode::BackTab | KeyCode::Char('h') | KeyCode::Left if !self.main_focused => {
+                self.focus(side.step(-1), false);
             }
+            _ => return self.forward_key(key, height),
         }
         AppCommand::Continue
     }
 
     fn reserves_key(&self, key: KeyCode) -> bool {
-        matches!(key, KeyCode::Char('0'..='3' | 'h' | 'l'))
+        matches!(key, KeyCode::Char('0'..='2' | 'h' | 'l'))
             || self
                 .panel_ref(self.side)
                 .is_some_and(|panel| panel.reserves_key(key))
@@ -295,13 +283,11 @@ impl Mode for Workspace {
         self.files.retry_reload()
     }
 
-    /// Rebuild the working tree's diff and re-read the history panels
-    /// and the status line. Commits and branches move with the working
-    /// tree (a commit empties the index), so this always asks for a
-    /// frame.
+    /// Rebuild the working tree's diff and re-read the branches. Commits
+    /// and branches move with the working tree (a commit empties the
+    /// index), so this always asks for a frame.
     fn reload(&mut self, viewport: Viewport, theme: &Theme) -> Result<bool, String> {
         let changed = self.files.reload(viewport, theme)?;
-        self.status.refresh();
         if let Some(branches) = &mut self.branches {
             branches.refresh();
         }
@@ -314,20 +300,18 @@ impl Mode for Workspace {
     }
 }
 
-/// Split the left column into the side panels: Status takes one line;
-/// the others share the rest, with the current panel taking the larger
-/// share.
-fn side_layout(area: Rect, current: Side) -> [Rect; 3] {
+/// Split the left column into the side panels, the current one taking
+/// the larger share.
+fn side_layout(area: Rect, current: Side) -> [Rect; 2] {
     let weight = |side| if side == current { 2 } else { 1 };
     let rects = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
             Constraint::Fill(weight(Side::Files)),
             Constraint::Fill(weight(Side::Branches)),
         ])
         .split(area);
-    [rects[0], rects[1], rects[2]]
+    [rects[0], rects[1]]
 }
 
 fn inner_height(area: Rect) -> usize {

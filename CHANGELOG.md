@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add support for Kotlin.
-- TUI: a lazygit-style layout. Numbered panels for Status, Files, and Local branches stack on the left, and the main view on the right shows what the focused panel selects: a file's diff, a branch's log, or a commit's diff. Press `1`–`3` to focus a panel, `0` for the main view, and `h`/`l` to step between panels. `Enter` drills into a branch's commits and a commit's files, and `Esc` backs out.
+- TUI: a lazygit-style layout. Numbered panels for Files and Local branches stack on the left, and the main view on the right shows what the focused panel selects: a file's diff, a branch's log, or a commit's diff. Press `1` or `2` to focus a panel and `0` for the main view, and `Tab`/`Shift+Tab` (or `h`/`l`) to switch panels. `Enter` on a file focuses its diff, and on a branch or commit drills into its commits or files; `Esc` backs out. In the main view, `Tab` switches the staged and unstaged diff.
 - TUI: directory rows show an open-directory arrow.
 - TUI: fold and unfold directories in the Files sidebar with Enter.
 - TUI: add shortcuts to stage and discard changes in git.

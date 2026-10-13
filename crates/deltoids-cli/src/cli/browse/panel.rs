@@ -46,6 +46,10 @@ pub(super) trait Panel {
     /// Send keys to the main view (`true`) or to the side panel.
     fn focus_main(&mut self, main: bool);
 
+    /// Whether keys go to the main view. A panel may move focus there on
+    /// its own, as `Enter` on a file does.
+    fn main_focused(&self) -> bool;
+
     /// Handle a key for whichever half has focus. `height` is that
     /// half's inner height.
     fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand;

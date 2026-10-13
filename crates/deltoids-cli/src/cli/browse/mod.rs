@@ -1,8 +1,8 @@
 //! The scrolling TUI opened by `deltoids tui`.
 //!
 //! A lazygit-style layout: numbered side panels stacked in the left column
-//! (status, the working-tree files of [`files::FilesMode`], and the local
-//! branches of [`history::History`]) and the main view on the
+//! (the working-tree files of [`files::FilesMode`] and the local branches
+//! of [`history::History`]) and the main view on the
 //! right. [`workspace::Workspace`] lays them out and routes input; each
 //! panel sits behind [`panel::Panel`].
 //!
@@ -809,7 +809,7 @@ fn draw_loading(frame: &mut ratatui::Frame<'_>, left: Rect, right: Rect, theme: 
     };
     frame.render_widget(
         loading(pane_block_with_title_line(
-            panel::panel_title(border, '2', "Files", theme),
+            panel::panel_title(border, '1', "Files", theme),
             border,
             None,
         )),

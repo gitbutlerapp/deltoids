@@ -5,8 +5,10 @@ use std::time::{Duration, Instant};
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout};
 
+use deltoids::render_tui::pane_border_color;
 use deltoids::{ChangeLayout, Theme};
 
 use super::mode::{DrawBudget, Mode};
@@ -22,7 +24,7 @@ pub(super) const PANE_HEIGHT: usize = HEIGHT as usize - 2;
 pub(super) fn screen(mode: &mut impl Mode) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let rows = draw(mode);
+        let rows = text(&draw(mode));
         let work = mode.background(true);
         if !work.pending && !work.changed {
             return rows;
@@ -54,7 +56,20 @@ fn columns(mode: &mut impl Mode) -> (String, String) {
     (left.join("\n"), right.join("\n"))
 }
 
-fn draw(mode: &mut impl Mode) -> Vec<String> {
+/// Whether the right pane's border shows focus.
+pub(super) fn right_focused(mode: &mut impl Mode) -> bool {
+    screen(mode);
+    let corner = &draw(mode)[(LEFT, 0)];
+    corner.fg == pane_border_color(true, &Theme::default())
+}
+
+fn text(buffer: &Buffer) -> Vec<String> {
+    (0..HEIGHT)
+        .map(|y| (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect()
+}
+
+fn draw(mode: &mut impl Mode) -> Buffer {
     let theme = Theme::default();
     let mut term = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
     term.draw(|frame| {
@@ -72,8 +87,5 @@ fn draw(mode: &mut impl Mode) -> Vec<String> {
         );
     })
     .unwrap();
-    let buffer = term.backend().buffer();
-    (0..HEIGHT)
-        .map(|y| (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect())
-        .collect()
+    term.backend().buffer().clone()
 }

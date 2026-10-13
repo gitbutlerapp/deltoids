@@ -13,21 +13,20 @@ laid out like lazygit: numbered panels on the left, and the main view [0]
 on the right showing what the focused panel selects.
 
 Panels:
-- [1] Status:      repository and checked-out branch
-- [2] Files:       working-tree changes; main shows their diff
-- [3] Local branches: main shows the selected branch's log; Enter lists
+- [1] Files:       working-tree changes; main shows their diff
+- [2] Local branches: main shows the selected branch's log; Enter lists
                    the branch's commits, and main shows the selected
                    commit's diff
 
 Keys:
-- 1-3 / 0:         focus a side panel / the main view
-- h / l, arrows:   previous / next side panel
-- Tab / Esc:       swap side panel and main view / leave the main view
+- 1 / 2 / 0:       focus a side panel / the main view
+- Tab / Shift+Tab: next / previous side panel (also l / h, arrows)
+- Enter:           on a file, focus its diff in the main view; on a
+                   branch or commit, drill down
+- Esc:             leave the main view; in Local branches, back up a step
+- Tab (main view): switch the staged / unstaged diff
 - j / k:           move within the focused panel (between diff lines in
                    the main view)
-- Enter:           drill down: a branch's commits, then a commit's files
-                   and diff
-- Esc:             back up one step in Local branches
 - Shift+J / K:     scroll the diff pane
 - PgUp / PgDn:     page the focused pane
 - < / >:           narrow / widen the sidebar (or drag the divider)
@@ -35,7 +34,8 @@ Keys:
 - q:               quit
 
 The diff shows staged and unstaged changes separately. When the selection
-has both, the diff title reads "Staged - Unstaged" and s switches between them.
+has both, the diff title reads "Staged - Unstaged" and s (or Tab in the main
+view) switches between them.
 
 Review comments, with a diff in the main view focused (0):
 - c:               comment on the diff line under the cursor

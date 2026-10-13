@@ -502,6 +502,10 @@ impl Panel for History {
         self.sync_focus();
     }
 
+    fn main_focused(&self) -> bool {
+        self.main_focused
+    }
+
     fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand {
         if self.captures_text_input() {
             return self.forward_key(key, height);
@@ -527,8 +531,15 @@ impl Panel for History {
             }
             // Shift+J/K scroll the preview, as they scroll the diff from
             // the Files panel.
-            (Screen::Commits, KeyCode::Char('J' | 'K')) | (Screen::Commit, _) => {
-                return self.forward_key(key, height);
+            (Screen::Commits, KeyCode::Char('J' | 'K')) => return self.forward_key(key, height),
+            // An open commit's file tree; Enter on a file moves focus to
+            // its diff.
+            (Screen::Commit, _) => {
+                let command = self.forward_key(key, height);
+                if let Some(view) = self.current_commit_view() {
+                    self.main_focused = view.main_focused();
+                }
+                return command;
             }
             _ => self.move_list(key, height),
         }
