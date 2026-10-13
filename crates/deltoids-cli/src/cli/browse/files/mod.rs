@@ -54,6 +54,8 @@ use crate::sidebar::{Sidebar, display_path};
 use super::comment_view::render_comment_editor;
 use super::comments::{CommentAnchor, CommentStore, reanchor, review_text};
 use super::mode::{AppCommand, BackgroundWork, DrawBudget, Mode, Viewport};
+use super::panel::{self, panel_title};
+use deltoids::render_tui::pane_border_color;
 
 mod action_menu;
 mod actions;
@@ -79,7 +81,6 @@ use model::build_model;
 use model::{Column, Model};
 use reload::{Patches, ReloadOutcome, reload_working_tree};
 use sidebar_pane::build_sidebar;
-pub(crate) use sidebar_pane::sidebar_title;
 use stage_panes::{PaneSpec, PaneTitle, StagePanes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -843,21 +844,6 @@ fn handle_key(state: &mut FilesMode, key: KeyCode, height: usize) -> AppCommand 
             }
             AppCommand::Continue
         }
-        KeyCode::Tab | KeyCode::BackTab => {
-            state.focus = match state.focus {
-                Focus::Sidebar => Focus::Diff,
-                Focus::Diff => Focus::Sidebar,
-            };
-            AppCommand::Continue
-        }
-        KeyCode::Char('1') => {
-            state.focus = Focus::Sidebar;
-            AppCommand::Continue
-        }
-        KeyCode::Char('2') => {
-            state.focus = Focus::Diff;
-            AppCommand::Continue
-        }
         // Shift+J/K always scroll the diff regardless of focus.
         KeyCode::Char('J') => {
             let column = state.shown();
@@ -1220,18 +1206,9 @@ impl Mode for FilesMode {
         theme: &Theme,
         budget: DrawBudget,
     ) {
-        self.sidebar_rect = left;
-        let sidebar_focused = self.focus == Focus::Sidebar;
-        sidebar_pane::draw_sidebar(
-            frame,
-            left,
-            &self.sidebar,
-            &self.label,
-            sidebar_pane::sidebar_footer(&self.sidebar, theme),
-            sidebar_focused,
-            theme,
-        );
-        let diff_focused = self.focus == Focus::Diff;
+        let (sidebar_focused, diff_focused) =
+            (self.focus == Focus::Sidebar, self.focus == Focus::Diff);
+        panel::Panel::draw_side(self, frame, left, '2', sidebar_focused, theme);
         self.draw_diff(frame, right, layout, theme, budget, diff_focused);
     }
 
@@ -1335,6 +1312,75 @@ impl Mode for FilesMode {
         let rel = crate::sidebar::display_path(file);
         let workdir = self.repo.as_ref()?.workdir()?;
         Some(workdir.join(rel))
+    }
+}
+
+impl panel::Panel for FilesMode {
+    fn draw_side(
+        &mut self,
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        number: char,
+        focused: bool,
+        theme: &Theme,
+    ) {
+        self.sidebar_rect = area;
+        self.sidebar
+            .reveal_selected(area.height.saturating_sub(2) as usize);
+        let color = pane_border_color(focused, theme);
+        sidebar_pane::draw_sidebar(
+            frame,
+            area,
+            &self.sidebar,
+            panel_title(color, number, &self.label, theme),
+            sidebar_pane::sidebar_footer(&self.sidebar, theme),
+            focused,
+            theme,
+        );
+    }
+
+    fn draw_main(
+        &mut self,
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        focused: bool,
+        layout: ChangeLayout,
+        theme: &Theme,
+        budget: DrawBudget,
+    ) {
+        self.draw_diff(frame, area, layout, theme, budget, focused);
+    }
+
+    fn focus_main(&mut self, main: bool) {
+        self.focus = if main { Focus::Diff } else { Focus::Sidebar };
+    }
+
+    fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand {
+        handle_key(self, key, height)
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent, height: usize) -> AppCommand {
+        handle_mouse(self, mouse, height)
+    }
+
+    fn background(&mut self, active: bool) -> BackgroundWork {
+        Mode::background(self, active)
+    }
+
+    fn reserves_key(&self, key: KeyCode) -> bool {
+        Mode::reserves_key(self, key)
+    }
+
+    fn captures_text_input(&self) -> bool {
+        Mode::captures_text_input(self)
+    }
+
+    fn report_copy(&mut self, result: Result<(), String>) {
+        Mode::report_copy(self, result);
+    }
+
+    fn selected_path(&self) -> Option<PathBuf> {
+        Mode::selected_path(self)
     }
 }
 
@@ -2126,21 +2172,6 @@ mod tests {
             !text.contains("No local changes."),
             "error state must not show the clean message: {text:?}"
         );
-    }
-
-    #[test]
-    fn handle_key_tab_toggles_focus() {
-        let resolved = vec![ResolvedFile {
-            file: file_diff("a.txt"),
-            before: "a\n".to_string(),
-            after: "b\n".to_string(),
-        }];
-        let mut state = make_state(&resolved);
-        assert_eq!(state.focus, Focus::Sidebar);
-        handle_key(&mut state, KeyCode::Tab, 4);
-        assert_eq!(state.focus, Focus::Diff);
-        handle_key(&mut state, KeyCode::Tab, 4);
-        assert_eq!(state.focus, Focus::Sidebar);
     }
 
     #[test]

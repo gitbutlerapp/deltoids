@@ -1,9 +1,10 @@
 //! The scrolling TUI opened by `deltoids tui`.
 //!
-//! The left column is a file-tree sidebar and the right pane shows the
-//! working-tree diff. Both belong to [`files::FilesMode`]. `b` swaps
-//! them for [`history::History`]: local branches, their commits, and
-//! each commit's diff. [`workspace::Workspace`] routes between the two.
+//! A lazygit-style layout: numbered side panels stacked in the left column
+//! (status, the working-tree files of [`files::FilesMode`], and the local
+//! branches and commits of [`history::History`]) and the main view on the
+//! right. [`workspace::Workspace`] lays them out and routes input; each
+//! panel sits behind [`panel::Panel`].
 //!
 //! ## Module layout
 //!
@@ -55,6 +56,7 @@ mod files;
 mod help;
 mod history;
 mod mode;
+mod panel;
 mod scroll;
 mod sidebar_width;
 mod suspend;
@@ -807,13 +809,13 @@ fn draw_loading(frame: &mut ratatui::Frame<'_>, left: Rect, right: Rect, theme: 
     };
     frame.render_widget(
         loading(pane_block_with_title_line(
-            files::sidebar_title(border, "Files", theme),
+            panel::panel_title(border, '2', "Files", theme),
             border,
             None,
         )),
         left,
     );
-    frame.render_widget(loading(pane_block("─Diff─", border)), right);
+    frame.render_widget(loading(pane_block("─[0]─Diff─", border)), right);
 }
 
 /// Toggle the diff change-layout: `Grouped ⇆ interleaved`. Interleaved uses

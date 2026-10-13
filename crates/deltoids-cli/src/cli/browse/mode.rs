@@ -4,8 +4,8 @@
 //! The shell (`super`) owns the terminal, the event loop, the one
 //! draggable divider, sidebar sizing, the help popup, and reload timing.
 //! Everything else lives behind this trait. The production adapter is
-//! [`super::files::FilesMode`] (the working-tree view); the shell tests use
-//! a recording adapter.
+//! [`super::workspace::Workspace`] (the lazygit-style panel layout); the
+//! shell tests use a recording adapter.
 //!
 //! The mode owns its full vertical slice: state, key handling, mouse
 //! hit-testing, render, and live-reload. The shell never reaches inside.

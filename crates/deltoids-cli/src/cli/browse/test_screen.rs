@@ -32,11 +32,6 @@ pub(super) fn screen(mode: &mut impl Mode) -> Vec<String> {
     }
 }
 
-/// The settled screen as one string.
-pub(super) fn screen_text(mode: &mut impl Mode) -> String {
-    screen(mode).join("\n")
-}
-
 /// The left column of the settled screen.
 pub(super) fn left_text(mode: &mut impl Mode) -> String {
     columns(mode).0

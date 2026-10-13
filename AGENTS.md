@@ -79,7 +79,7 @@ crates/
     src/cli/browse/          # scrolling TUI
       mod.rs                 #   shell: loop, routing, layout, divider,
                              #     resize, help, reload orchestration
-      mode.rs               #   Mode trait (seam to FilesMode) + AppCommand
+      mode.rs               #   Mode trait (seam to Workspace) + AppCommand
       events.rs             #   input-event burst draining
       terminal.rs           #   terminal session guard
       sidebar_width.rs      #   sidebar sizing policy
@@ -95,11 +95,15 @@ crates/
       watch.rs              #   shared workdir watcher + reload filter
       tests.rs              #   shell tests (mock Mode)
       test_screen.rs        #   draw any Mode to text (test helper)
-      workspace/             #   root Mode: working tree or history
-      history/               #   branches -> commits -> commit diff
-        mod.rs               #     History impl of Mode, list rendering
+      panel.rs              #   Panel trait (side panel + main view) + titles
+      workspace/             #   root Mode: lazygit layout, focus, routing
+        mod.rs               #     panel stack, keys, mouse, reload
+        status.rs            #     [1] Status panel
+        tests.rs             #     layout and navigation tests
+      history/               #   [3] branches / [4] commits panels
+        mod.rs               #     drill-down to a commit's files, list rendering
         cursor.rs            #     list selection + scroll
-      files/                 #   FilesMode (working-tree diff)
+      files/                 #   FilesMode (working-tree diff; read-only commit view)
         mod.rs               #     FilesMode impl of Mode
         model.rs             #     parse/resolve/diff
         diff_pane.rs         #     diff pane slice

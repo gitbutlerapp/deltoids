@@ -1,32 +1,29 @@
-//! History mode: local branches, the commits on each, and each commit's
-//! diff, in the spirit of lazygit's branches → commits → commit files
-//! drill-down.
+//! History panels: local branches and commits, in the spirit of
+//! lazygit's branches and commits panels.
 //!
-//! Three screens share the left column, each a step down from the last:
+//! One [`History`] backs each panel, starting from a different root:
 //!
-//! - **Branches**: every local branch, the checked-out one first. The
-//!   right pane shows the selected branch's log.
-//! - **Commits**: the commits of the chosen branch, newest first, loaded
-//!   a page at a time. The right pane previews the selected commit's
-//!   diff.
-//! - **Commit**: the chosen commit as a read-only [`FilesMode`]: its file
-//!   tree on the left and its diff on the right, with every diff-pane
-//!   feature (cursor, comments, hunk reshaping) but no staging.
+//! - [`History::branches`] lists every local branch, the checked-out one
+//!   first; the main view shows the selected branch's log. `Enter` lists
+//!   the branch's commits in the same panel.
+//! - [`History::log`] lists the checked-out branch's commits.
 //!
-//! `Enter` steps down, `Esc` steps back up, and `Esc` on the branches
-//! closes history ([`History::is_closed`]). Each step keeps its own
-//! selection, so walking back up lands where the user left off.
+//! From a commit list, newest first and loaded a page at a time, the
+//! main view previews the selected commit's diff, and `Enter` opens the
+//! commit in the panel as a read-only [`FilesMode`]: its file tree in the
+//! panel and its diff in the main view, with every diff-pane feature
+//! (cursor, comments, hunk reshaping) but no staging. `Esc` steps back
+//! up to the root; each step keeps its selection.
 //!
-//! History is a static snapshot of the repository taken when it opens:
-//! it never watches or reloads.
+//! The lists are a snapshot; [`History::refresh`] re-reads them and keeps
+//! each selection on the same branch or commit.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
-use ratatui::layout::{Margin, Rect};
+use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -38,18 +35,18 @@ use deltoids::render_tui::{
 use deltoids::{ChangeLayout, Theme, git};
 
 use super::diff_scrollbar;
-use super::files::{FilesMode, sidebar_title};
-use super::mode::{AppCommand, BackgroundWork, DrawBudget, Mode, Viewport};
-use super::watch::ChangeReceiver;
+use super::files::FilesMode;
+use super::mode::{AppCommand, BackgroundWork, DrawBudget};
+use super::panel::{Panel, panel_title};
 
 mod cursor;
 
 use cursor::Cursor;
 
-/// How many commits one page of the commit list loads.
+/// How many commits one page of a commit list loads.
 const PAGE: usize = 200;
 
-/// Which step of the drill-down the left column shows.
+/// Which step of the drill-down the panel shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Branches,
@@ -57,66 +54,154 @@ enum Screen {
     Commit,
 }
 
-/// The commits of one branch, loaded a page at a time.
+/// The commits reachable from one revision, loaded a page at a time.
 struct CommitList {
-    branch: String,
+    rev: String,
+    label: String,
     commits: Result<Vec<git::Commit>, String>,
     /// Whether the last load returned fewer commits than it asked for.
     exhausted: bool,
     cursor: Cursor,
 }
 
-/// The diff of one commit: the commit list's preview, and the whole
-/// screen once the user steps into it.
+impl CommitList {
+    fn load(repo: &git::Repo, rev: String, label: String) -> Self {
+        let commits = repo.commits(&rev, PAGE);
+        Self {
+            exhausted: commits.as_ref().map_or(true, |c| c.len() < PAGE),
+            rev,
+            label,
+            commits,
+            cursor: Cursor::default(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.commits.as_ref().map_or(0, Vec::len)
+    }
+
+    fn selected(&self) -> Option<&git::Commit> {
+        self.commits.as_ref().ok()?.get(self.cursor.selected)
+    }
+
+    /// Load the next page once the selection reaches the last commit.
+    fn load_more(&mut self, repo: &git::Repo) {
+        if self.exhausted || self.cursor.selected + 1 < self.len() {
+            return;
+        }
+        let want = self.len() + PAGE;
+        if let Ok(more) = repo.commits(&self.rev, want) {
+            self.exhausted = more.len() < want;
+            self.commits = Ok(more);
+        }
+    }
+
+    /// Re-read as many commits as are loaded, keeping the selection on
+    /// the same commit when it is still there.
+    fn refresh(&mut self, repo: &git::Repo) {
+        let selected = self.selected().map(|c| c.id.clone());
+        let want = self.len().max(PAGE);
+        self.commits = repo.commits(&self.rev, want);
+        self.exhausted = self.len() < want;
+        if let Some(index) = selected.and_then(|id| {
+            let commits = self.commits.as_ref().ok()?;
+            commits.iter().position(|c| c.id == id)
+        }) {
+            self.cursor.selected = index;
+        }
+    }
+}
+
+/// The diff of one commit: the commit list's preview, and the panel's
+/// content once the user steps into it.
 struct CommitView {
     id: String,
     view: Result<FilesMode, String>,
 }
 
+/// A list pane's frame: its title, footer, and whether it has focus.
+struct Chrome {
+    title: Line<'static>,
+    footer: Option<Line<'static>>,
+    focused: bool,
+}
+
 pub(super) struct History {
     repo: git::Repo,
+    /// The step `Esc` stops at.
+    root: Screen,
     screen: Screen,
-    closed: bool,
+    main_focused: bool,
     branches: Result<Vec<git::Branch>, String>,
     branch_cursor: Cursor,
-    /// Each branch's log for the branches screen's right pane.
+    /// Each branch's log for the branches screen's main view.
     logs: HashMap<String, Result<Vec<git::Commit>, String>>,
+    /// First log line on screen.
+    log_scroll: usize,
     commits: Option<CommitList>,
     commit: Option<CommitView>,
-    /// Seconds since the epoch when history opened; commit ages count
-    /// from here.
+    /// Seconds since the epoch at the last read; commit ages count from
+    /// here.
     now: i64,
     /// Width of the diff body a commit view renders at.
     diff_width: usize,
-    left_rect: Rect,
-    right_rect: Rect,
+    side_rect: Rect,
+    main_rect: Rect,
 }
 
 impl History {
-    /// Open on the repository's local branches.
-    pub(super) fn open(repo: git::Repo) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    /// The local-branches panel.
+    pub(super) fn branches(repo: git::Repo) -> Self {
+        Self::new(repo, Screen::Branches)
+    }
+
+    /// The commits panel: the checked-out branch's commits.
+    pub(super) fn log(repo: git::Repo) -> Self {
+        let mut history = Self::new(repo, Screen::Commits);
+        history.commits = Some(CommitList::load(
+            &history.repo,
+            "HEAD".to_string(),
+            "Commits".to_string(),
+        ));
+        history
+    }
+
+    fn new(repo: git::Repo, root: Screen) -> Self {
         Self {
             branches: repo.local_branches(),
             repo,
-            screen: Screen::Branches,
-            closed: false,
+            root,
+            screen: root,
+            main_focused: false,
             branch_cursor: Cursor::default(),
             logs: HashMap::new(),
+            log_scroll: 0,
             commits: None,
             commit: None,
-            now,
+            now: now(),
             diff_width: 0,
-            left_rect: Rect::default(),
-            right_rect: Rect::default(),
+            side_rect: Rect::default(),
+            main_rect: Rect::default(),
         }
     }
 
-    /// Whether the user stepped back out of the branches screen.
-    pub(super) fn is_closed(&self) -> bool {
-        self.closed
+    /// Re-read branches and commits, keeping each selection on the same
+    /// branch or commit when it still exists. An open commit stays open:
+    /// a commit never changes.
+    pub(super) fn refresh(&mut self) {
+        self.now = now();
+        let selected = self.selected_branch().map(|b| b.name.clone());
+        self.branches = self.repo.local_branches();
+        if let Some(index) = selected.and_then(|name| {
+            let branches = self.branches.as_ref().ok()?;
+            branches.iter().position(|b| b.name == name)
+        }) {
+            self.branch_cursor.selected = index;
+        }
+        self.logs.clear();
+        if let Some(list) = self.commits.as_mut() {
+            list.refresh(&self.repo);
+        }
     }
 
     fn branch_count(&self) -> usize {
@@ -131,8 +216,7 @@ impl History {
     }
 
     fn selected_commit(&self) -> Option<&git::Commit> {
-        let list = self.commits.as_ref()?;
-        list.commits.as_ref().ok()?.get(list.cursor.selected)
+        self.commits.as_ref()?.selected()
     }
 
     /// The commit view, while it shows the selected commit.
@@ -143,6 +227,15 @@ impl History {
             return None;
         }
         commit.view.as_mut().ok()
+    }
+
+    fn current_commit_view_ref(&self) -> Option<&FilesMode> {
+        let id = &self.selected_commit()?.id;
+        let commit = self.commit.as_ref()?;
+        if &commit.id != id {
+            return None;
+        }
+        commit.view.as_ref().ok()
     }
 
     /// Build the selected commit's view unless it is already built.
@@ -158,61 +251,79 @@ impl History {
             view: FilesMode::commit(&self.repo, &selected, theme, self.diff_width),
             id: selected.id,
         });
+        self.sync_focus();
     }
 
-    fn open_commits(&mut self) {
+    /// Point the commit view's own focus where this panel's keys go: its
+    /// file tree only while the commit is open with the panel focused.
+    fn sync_focus(&mut self) {
+        let main = self.main_focused || self.screen != Screen::Commit;
+        if let Some(view) = self.current_commit_view() {
+            view.focus_main(main);
+        }
+    }
+
+    fn set_screen(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.sync_focus();
+    }
+
+    fn open_branch_commits(&mut self) {
         let Some(branch) = self.selected_branch().map(|b| b.name.clone()) else {
             return;
         };
-        if self
-            .commits
-            .as_ref()
-            .is_none_or(|list| list.branch != branch)
-        {
-            let commits = self.repo.commits(&branch, PAGE);
-            self.commits = Some(CommitList {
-                exhausted: commits.as_ref().map_or(true, |c| c.len() < PAGE),
-                branch,
-                commits,
-                cursor: Cursor::default(),
-            });
+        if self.commits.as_ref().is_none_or(|list| list.rev != branch) {
+            let label = format!("Commits ({branch})");
+            self.commits = Some(CommitList::load(&self.repo, branch, label));
         }
-        self.screen = Screen::Commits;
+        self.set_screen(Screen::Commits);
     }
 
-    /// Load the next page once the selection reaches the last commit.
-    fn load_more_commits(&mut self) {
-        let Some(list) = self.commits.as_mut() else {
-            return;
+    fn step_back(&mut self) {
+        let up = match self.screen {
+            Screen::Commit => Screen::Commits,
+            Screen::Commits | Screen::Branches => Screen::Branches,
         };
-        let Ok(commits) = &list.commits else {
-            return;
-        };
-        if list.exhausted || list.cursor.selected + 1 < commits.len() {
-            return;
-        }
-        let want = commits.len() + PAGE;
-        if let Ok(more) = self.repo.commits(&list.branch, want) {
-            list.exhausted = more.len() < want;
-            list.commits = Ok(more);
+        if self.screen != self.root {
+            self.set_screen(up);
         }
     }
 
-    fn handle_list_key(&mut self, key: KeyCode, height: usize) {
+    fn move_list(&mut self, key: KeyCode, height: usize) {
         match self.screen {
             Screen::Branches => {
                 let len = self.branch_count();
                 self.branch_cursor.handle_key(key, len, height);
+                self.log_scroll = 0;
             }
             Screen::Commits => {
                 if let Some(list) = self.commits.as_mut() {
-                    let len = list.commits.as_ref().map_or(0, Vec::len);
+                    let len = list.len();
                     list.cursor.handle_key(key, len, height);
+                    list.load_more(&self.repo);
                 }
-                self.load_more_commits();
             }
             Screen::Commit => {}
         }
+    }
+
+    fn scroll_log(&mut self, key: KeyCode, height: usize) {
+        let len = match self.branch_log() {
+            Some(Ok(commits)) => commits.len(),
+            _ => 0,
+        };
+        let last = len.saturating_sub(1);
+        let page = height.max(1);
+        self.log_scroll = match key {
+            KeyCode::Char('j') | KeyCode::Down => self.log_scroll.saturating_add(1),
+            KeyCode::Char('k') | KeyCode::Up => self.log_scroll.saturating_sub(1),
+            KeyCode::PageDown => self.log_scroll.saturating_add(page),
+            KeyCode::PageUp => self.log_scroll.saturating_sub(page),
+            KeyCode::Char('g') | KeyCode::Home => 0,
+            KeyCode::Char('G') | KeyCode::End => last,
+            _ => return,
+        }
+        .min(last);
     }
 
     /// The selected branch's log, loaded on first view.
@@ -226,38 +337,24 @@ impl History {
         )
     }
 
-    fn draw_branches(&mut self, frame: &mut Frame<'_>, left: Rect, theme: &Theme) {
+    fn draw_branches(&mut self, frame: &mut Frame<'_>, area: Rect, chrome: Chrome, theme: &Theme) {
         let now = self.now;
         let rows = match &self.branches {
             Ok(branches) if branches.is_empty() => Err("No branches.".to_string()),
             Ok(branches) => Ok(branches.iter().map(|b| branch_row(b, now, theme)).collect()),
             Err(err) => Err(err.clone()),
         };
-        let title = sidebar_title(pane_border_color(true, theme), "Branches", theme);
-        draw_list(
-            frame,
-            left,
-            title,
-            None,
-            rows,
-            &mut self.branch_cursor,
-            theme,
-        );
+        draw_list(frame, area, chrome, rows, &mut self.branch_cursor, theme);
     }
 
-    fn draw_branch_log(&mut self, frame: &mut Frame<'_>, right: Rect, theme: &Theme) {
-        let now = self.now;
-        let lines = match self.branch_log() {
-            Some(Ok(commits)) => commits.iter().map(|c| commit_row(c, now, theme)).collect(),
-            Some(Err(err)) => vec![Line::from(err.clone())],
-            None => Vec::new(),
-        };
-        let color = pane_border_color(false, theme);
-        let block = pane_block_with_title_line(pane_title("Log", theme), color, None);
-        frame.render_widget(Paragraph::new(lines).block(block), right);
-    }
-
-    fn draw_commits(&mut self, frame: &mut Frame<'_>, left: Rect, theme: &Theme) {
+    fn draw_commits(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        number: char,
+        focused: bool,
+        theme: &Theme,
+    ) {
         let now = self.now;
         let footer = self.selected_commit().map(|c| commit_footer(c, now, theme));
         let Some(list) = self.commits.as_mut() else {
@@ -268,48 +365,74 @@ impl History {
             Ok(commits) => Ok(commits.iter().map(|c| commit_row(c, now, theme)).collect()),
             Err(err) => Err(err.clone()),
         };
-        let label = format!("Commits ({})", list.branch);
-        let title = sidebar_title(pane_border_color(true, theme), &label, theme);
-        draw_list(frame, left, title, footer, rows, &mut list.cursor, theme);
+        let chrome = Chrome {
+            title: panel_title(
+                pane_border_color(focused, theme),
+                number,
+                &list.label,
+                theme,
+            ),
+            footer,
+            focused,
+        };
+        draw_list(frame, area, chrome, rows, &mut list.cursor, theme);
     }
 
-    fn draw_preview(
+    fn draw_branch_log(&mut self, frame: &mut Frame<'_>, area: Rect, focused: bool, theme: &Theme) {
+        let now = self.now;
+        let scroll = self.log_scroll;
+        let lines = match self.branch_log() {
+            Some(Ok(commits)) => commits
+                .iter()
+                .skip(scroll)
+                .map(|c| commit_row(c, now, theme))
+                .collect(),
+            Some(Err(err)) => vec![Line::from(err.clone())],
+            None => Vec::new(),
+        };
+        let color = pane_border_color(focused, theme);
+        let block = pane_block_with_title_line(panel_title(color, '0', "Log", theme), color, None);
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    fn draw_commit_diff(
         &mut self,
         frame: &mut Frame<'_>,
-        right: Rect,
+        area: Rect,
+        focused: bool,
         layout: ChangeLayout,
         theme: &Theme,
         budget: DrawBudget,
     ) {
-        // Building a commit's diff costs real time: wait for held keys to
-        // settle before building the newly selected one.
-        if budget == DrawBudget::Full {
+        // Building a commit's diff costs real time: in the list, wait for
+        // held keys to settle before building the newly selected one.
+        if budget == DrawBudget::Full || self.screen == Screen::Commit {
             self.ensure_commit_view(theme);
         }
         let selected = self.selected_commit().map(|c| c.id.clone());
-        let color = pane_border_color(false, theme);
+        let color = pane_border_color(focused, theme);
         let message = |text: &str| {
             Paragraph::new(text.to_string())
                 .style(Style::default().fg(rgb_to_color(theme.muted)))
                 .block(pane_block_with_title_line(
-                    pane_title("Diff", theme),
+                    panel_title(color, '0', "Diff", theme),
                     color,
                     None,
                 ))
         };
         match self.commit.as_mut() {
             Some(commit) if Some(&commit.id) == selected.as_ref() => match &mut commit.view {
-                Ok(view) => view.draw_diff(frame, right, layout, theme, budget, false),
-                Err(err) => frame.render_widget(message(err), right),
+                Ok(view) => view.draw_main(frame, area, focused, layout, theme, budget),
+                Err(err) => frame.render_widget(message(err), area),
             },
-            _ if selected.is_none() => frame.render_widget(message(""), right),
-            _ => frame.render_widget(message("Loading…"), right),
+            _ if selected.is_none() => frame.render_widget(message(""), area),
+            _ => frame.render_widget(message("Loading…"), area),
         }
     }
 
-    /// Select the list row under a click in the left column.
+    /// Select the list row under a click in the side panel.
     fn click_row(&mut self, row: u16) {
-        let inner = self.left_rect.inner(Margin {
+        let inner = self.side_rect.inner(Margin {
             vertical: 1,
             horizontal: 1,
         });
@@ -321,66 +444,59 @@ impl History {
             Screen::Branches => {
                 let len = self.branch_count();
                 self.branch_cursor.click(offset, len);
+                self.log_scroll = 0;
             }
             Screen::Commits => {
                 if let Some(list) = self.commits.as_mut() {
-                    let len = list.commits.as_ref().map_or(0, Vec::len);
+                    let len = list.len();
                     list.cursor.click(offset, len);
+                    list.load_more(&self.repo);
                 }
-                self.load_more_commits();
             }
             Screen::Commit => {}
         }
     }
+
+    fn forward_key(&mut self, key: KeyCode, height: usize) -> AppCommand {
+        self.current_commit_view()
+            .map_or(AppCommand::Continue, |view| {
+                Panel::handle_key(view, key, height)
+            })
+    }
 }
 
-impl Mode for History {
-    fn background(&mut self, active: bool) -> BackgroundWork {
-        match self.current_commit_view() {
-            Some(view) => view.background(active),
-            None => BackgroundWork::default(),
-        }
-    }
-
-    fn build(&mut self, _theme: &Theme, _diff_width: usize) {}
-
-    fn draw(
+impl Panel for History {
+    fn draw_side(
         &mut self,
         frame: &mut Frame<'_>,
-        left: Rect,
-        right: Rect,
-        layout: ChangeLayout,
+        area: Rect,
+        number: char,
+        focused: bool,
         theme: &Theme,
-        budget: DrawBudget,
     ) {
-        self.left_rect = left;
-        self.right_rect = right;
-        self.diff_width = diff_scrollbar::body_area(right).width as usize;
+        self.side_rect = area;
         match self.screen {
             Screen::Branches => {
-                self.draw_branches(frame, left, theme);
-                self.draw_branch_log(frame, right, theme);
+                let color = pane_border_color(focused, theme);
+                let chrome = Chrome {
+                    title: panel_title(color, number, "Local branches", theme),
+                    footer: None,
+                    focused,
+                };
+                self.draw_branches(frame, area, chrome, theme);
             }
-            Screen::Commits => {
-                self.draw_commits(frame, left, theme);
-                self.draw_preview(frame, right, layout, theme, budget);
-            }
+            Screen::Commits => self.draw_commits(frame, area, number, focused, theme),
             Screen::Commit => {
                 self.ensure_commit_view(theme);
                 match self.commit.as_mut().map(|c| &mut c.view) {
-                    Some(Ok(view)) => view.draw(frame, left, right, layout, theme, budget),
+                    Some(Ok(view)) => view.draw_side(frame, area, number, focused, theme),
                     Some(Err(err)) => {
+                        let color = pane_border_color(focused, theme);
+                        let title = panel_title(color, number, "Commit", theme);
+                        let block = pane_block_with_title_line(title, color, None);
                         let muted = Style::default().fg(rgb_to_color(theme.muted));
-                        let color = pane_border_color(true, theme);
-                        let block = pane_block_with_title_line(
-                            sidebar_title(color, "Commit", theme),
-                            color,
-                            None,
-                        );
-                        frame.render_widget(
-                            Paragraph::new(err.clone()).style(muted).block(block),
-                            left,
-                        );
+                        let message = Paragraph::new(err.clone()).style(muted).block(block);
+                        frame.render_widget(message, area);
                     }
                     None => {}
                 }
@@ -388,115 +504,123 @@ impl Mode for History {
         }
     }
 
+    fn draw_main(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        focused: bool,
+        layout: ChangeLayout,
+        theme: &Theme,
+        budget: DrawBudget,
+    ) {
+        self.main_rect = area;
+        self.diff_width = diff_scrollbar::body_area(area).width as usize;
+        match self.screen {
+            Screen::Branches => self.draw_branch_log(frame, area, focused, theme),
+            Screen::Commits | Screen::Commit => {
+                self.draw_commit_diff(frame, area, focused, layout, theme, budget);
+            }
+        }
+    }
+
+    fn focus_main(&mut self, main: bool) {
+        self.main_focused = main;
+        self.sync_focus();
+    }
+
     fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand {
+        if self.captures_text_input() {
+            return self.forward_key(key, height);
+        }
+        if self.main_focused {
+            return match self.screen {
+                Screen::Branches => {
+                    self.scroll_log(key, height);
+                    AppCommand::Continue
+                }
+                Screen::Commits | Screen::Commit => self.forward_key(key, height),
+            };
+        }
         match (self.screen, key) {
-            (Screen::Commit, _) if self.captures_text_input() => self
-                .current_commit_view()
-                .map_or(AppCommand::Continue, |view| view.handle_key(key, height)),
-            (Screen::Commit, KeyCode::Esc) => {
-                self.screen = Screen::Commits;
-                AppCommand::Continue
-            }
-            (Screen::Commit, _) => self
-                .current_commit_view()
-                .map_or(AppCommand::Continue, |view| view.handle_key(key, height)),
-            (Screen::Commits, KeyCode::Esc) => {
-                self.screen = Screen::Branches;
-                AppCommand::Continue
-            }
+            (_, KeyCode::Esc) => self.step_back(),
+            (Screen::Branches, KeyCode::Enter) => self.open_branch_commits(),
             // The next draw builds the commit's view if the preview has
             // not yet.
             (Screen::Commits, KeyCode::Enter) => {
                 if self.selected_commit().is_some() {
-                    self.screen = Screen::Commit;
+                    self.set_screen(Screen::Commit);
                 }
-                AppCommand::Continue
             }
-            // Shift+J/K scroll the preview, as they scroll the diff in
-            // the working-tree view.
-            (Screen::Commits, KeyCode::Char('J' | 'K')) => self
-                .current_commit_view()
-                .map_or(AppCommand::Continue, |view| view.handle_key(key, height)),
-            (Screen::Branches, KeyCode::Esc) => {
-                self.closed = true;
-                AppCommand::Continue
+            // Shift+J/K scroll the preview, as they scroll the diff from
+            // the Files panel.
+            (Screen::Commits, KeyCode::Char('J' | 'K')) | (Screen::Commit, _) => {
+                return self.forward_key(key, height);
             }
-            (Screen::Branches, KeyCode::Enter) => {
-                self.open_commits();
-                AppCommand::Continue
-            }
-            _ => {
-                self.handle_list_key(key, height);
-                AppCommand::Continue
-            }
+            _ => self.move_list(key, height),
         }
-    }
-
-    fn reserves_key(&self, key: KeyCode) -> bool {
-        self.screen == Screen::Commit
-            && self
-                .commit
-                .as_ref()
-                .and_then(|c| c.view.as_ref().ok())
-                .is_some_and(|view| view.reserves_key(key))
-    }
-
-    fn captures_text_input(&self) -> bool {
-        self.screen == Screen::Commit
-            && self
-                .commit
-                .as_ref()
-                .and_then(|c| c.view.as_ref().ok())
-                .is_some_and(FilesMode::captures_text_input)
-    }
-
-    fn report_copy(&mut self, result: Result<(), String>) {
-        if let Some(view) = self.current_commit_view() {
-            view.report_copy(result);
-        }
+        AppCommand::Continue
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, height: usize) -> AppCommand {
-        let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+        let position = Position::new(mouse.column, mouse.row);
+        let in_main = self.main_rect.contains(position);
         let to_commit = match self.screen {
             Screen::Commit => true,
-            Screen::Commits => self.right_rect.contains(position),
+            Screen::Commits => in_main,
             Screen::Branches => false,
         };
         if to_commit {
             return self
                 .current_commit_view()
                 .map_or(AppCommand::Continue, |view| {
-                    view.handle_mouse(mouse, height)
+                    Panel::handle_mouse(view, mouse, height)
                 });
         }
-        if !self.left_rect.contains(position) {
-            return AppCommand::Continue;
-        }
+        let scroll = |history: &mut Self, key| {
+            if in_main {
+                history.scroll_log(key, height);
+            } else {
+                history.move_list(key, height);
+            }
+        };
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => self.click_row(mouse.row),
-            MouseEventKind::ScrollDown => self.handle_list_key(KeyCode::Down, height),
-            MouseEventKind::ScrollUp => self.handle_list_key(KeyCode::Up, height),
+            MouseEventKind::Down(MouseButton::Left) if !in_main => self.click_row(mouse.row),
+            MouseEventKind::ScrollDown => scroll(self, KeyCode::Down),
+            MouseEventKind::ScrollUp => scroll(self, KeyCode::Up),
             _ => {}
         }
         AppCommand::Continue
     }
 
-    fn watch(&mut self) -> Result<Option<ChangeReceiver>, String> {
-        Ok(None)
+    fn background(&mut self, active: bool) -> BackgroundWork {
+        match self.current_commit_view() {
+            Some(view) => Panel::background(view, active),
+            None => BackgroundWork::default(),
+        }
     }
 
-    fn should_reload(&self, _paths: &[PathBuf]) -> bool {
-        false
+    fn reserves_key(&self, key: KeyCode) -> bool {
+        self.current_commit_view_ref()
+            .filter(|_| self.screen == Screen::Commit || self.main_focused)
+            .is_some_and(|view| Panel::reserves_key(view, key))
     }
 
-    fn reload(&mut self, _viewport: Viewport, _theme: &Theme) -> Result<bool, String> {
-        Ok(false)
+    fn captures_text_input(&self) -> bool {
+        self.current_commit_view_ref()
+            .is_some_and(Panel::captures_text_input)
     }
 
-    fn selected_path(&self) -> Option<PathBuf> {
-        None
+    fn report_copy(&mut self, result: Result<(), String>) {
+        if let Some(view) = self.current_commit_view() {
+            Panel::report_copy(view, result);
+        }
     }
+}
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
 /// Draw a list pane: `rows`, or a muted message in their place, with the
@@ -504,14 +628,13 @@ impl Mode for History {
 fn draw_list(
     frame: &mut Frame<'_>,
     area: Rect,
-    title: Line<'static>,
-    footer: Option<Line<'static>>,
+    chrome: Chrome,
     rows: Result<Vec<Line<'static>>, String>,
     cursor: &mut Cursor,
     theme: &Theme,
 ) {
-    let color = pane_border_color(true, theme);
-    let block = pane_block_with_title_line(title, color, footer);
+    let color = pane_border_color(chrome.focused, theme);
+    let block = pane_block_with_title_line(chrome.title, color, chrome.footer);
     let rows = match rows {
         Ok(rows) => rows,
         Err(message) => {
@@ -544,19 +667,9 @@ fn draw_list(
         rows.len(),
         cursor.selected,
         height,
-        true,
+        chrome.focused,
         theme,
     );
-}
-
-/// A plain pane title in the sidebar's `─Label─` style, without a badge.
-fn pane_title(label: &str, theme: &Theme) -> Line<'static> {
-    let rule = Style::default().fg(rgb_to_color(theme.border));
-    Line::from(vec![
-        Span::styled("─", rule),
-        Span::styled(label.to_string(), rule),
-        Span::styled("─", rule),
-    ])
 }
 
 /// `  2d * main`: the tip's age, a star on the checked-out branch.
@@ -604,7 +717,7 @@ fn commit_footer(commit: &git::Commit, now: i64, theme: &Theme) -> Line<'static>
 
 /// How long ago `time` was at `now`, in the largest whole unit: `45s`,
 /// `3m`, `2h`, `4d`, `2w`, `5M`, `1y`. Times after `now` read as `0s`.
-pub(super) fn age(now: i64, time: i64) -> String {
+fn age(now: i64, time: i64) -> String {
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
     const DAY: i64 = 24 * HOUR;
@@ -622,4 +735,20 @@ pub(super) fn age(now: i64, time: i64) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::age;
+
+    #[test]
+    fn ages_read_in_the_largest_whole_unit() {
+        assert_eq!(age(1_000, 1_000), "0s");
+        assert_eq!(age(1_059, 1_000), "59s");
+        assert_eq!(age(1_000 + 60, 1_000), "1m");
+        assert_eq!(age(1_000 + 2 * 3600, 1_000), "2h");
+        assert_eq!(age(1_000 + 3 * 86_400, 1_000), "3d");
+        assert_eq!(age(1_000 + 14 * 86_400, 1_000), "2w");
+        assert_eq!(age(1_000 + 60 * 86_400, 1_000), "2M");
+        assert_eq!(age(1_000 + 800 * 86_400, 1_000), "2y");
+        // A commit from the future (clock skew) reads as now.
+        assert_eq!(age(1_000, 2_000), "0s");
+    }
+}

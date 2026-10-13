@@ -1063,8 +1063,8 @@ fn heading(title: PaneTitle, theme: &Theme) -> Line<'static> {
         Column::Unstaged => "Unstaged",
     };
     match title {
-        PaneTitle::Diff => Line::from("─[2]─Diff─"),
-        PaneTitle::One(column) => Line::from(format!("─[2]─{} changes─", label(column))),
+        PaneTitle::Diff => Line::from("─[0]─Diff─"),
+        PaneTitle::One(column) => Line::from(format!("─[0]─{} changes─", label(column))),
         PaneTitle::Both(shown) => {
             let active = Style::default()
                 .fg(rgb_to_color(theme.border_active))
@@ -1075,7 +1075,7 @@ fn heading(title: PaneTitle, theme: &Theme) -> Line<'static> {
                 Span::styled(label(column), style)
             };
             Line::from(vec![
-                Span::raw("─[2]─"),
+                Span::raw("─[0]─"),
                 tab(Column::Staged),
                 Span::styled(" - ", inactive),
                 tab(Column::Unstaged),
