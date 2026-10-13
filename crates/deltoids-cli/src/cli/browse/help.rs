@@ -23,7 +23,7 @@ pub(super) const HELP_KEYS: &[(&str, &str)] = &[
     ("1-4 / 0", "focus a side panel / the main view"),
     ("h / l", "previous / next side panel"),
     ("Tab", "swap side panel and main view"),
-    ("Enter / Esc", "drill into / back out of branches and commits"),
+    ("Enter / Esc", "drill into / back out (branches, commits)"),
     ("j / k", "move (list, or between diff lines)"),
     ("Shift+J / K", "scroll diff three lines (any focus)"),
     ("Shift / Ctrl+wheel", "step through files"),
