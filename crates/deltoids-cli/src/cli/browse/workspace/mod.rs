@@ -4,7 +4,7 @@
 //! main view `[0]`, showing whatever the current side panel drives:
 //!
 //! 1. Files: the working-tree file tree; main shows its diff.
-//! 2. Local branches: main shows the selected branch's log. Drills down
+//! 2. Branches (local, or GitButler's): main shows the selected branch's log. Drills down
 //!    into a branch's commits (main: the selected commit's diff) and a
 //!    commit's files.
 //!
@@ -28,12 +28,13 @@ use ratatui::style::Style;
 use ratatui::widgets::Paragraph;
 
 use deltoids::render_tui::{pane_block_with_title_line, pane_border_color, rgb_to_color};
-use deltoids::{ChangeLayout, Theme, git};
+use deltoids::{ChangeLayout, Theme};
 
 use super::files::FilesMode;
 use super::history::History;
 use super::mode::{AppCommand, BackgroundWork, DrawBudget, Mode, Viewport};
 use super::panel::{Panel, panel_title};
+use super::vcs::Vcs;
 use super::watch::ChangeReceiver;
 
 /// The side panels, top to bottom.
@@ -99,7 +100,7 @@ impl Workspace {
         self.branches = self
             .files
             .repo_dir()
-            .and_then(|dir| git::Repo::discover_at(&dir))
+            .and_then(|dir| Vcs::discover_at(&dir))
             .map(History::branches);
     }
 

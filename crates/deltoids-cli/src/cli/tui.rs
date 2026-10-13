@@ -14,7 +14,7 @@ on the right showing what the focused panel selects.
 
 Panels:
 - [1] Files:       working-tree changes; main shows their diff
-- [2] Local branches: main shows the selected branch's log; Enter lists
+- [2] Branches:    main shows the selected branch's log; Enter lists
                    the branch's commits, and main shows the selected
                    commit's diff
 
@@ -23,7 +23,7 @@ Keys:
 - Tab / Shift+Tab: next / previous side panel (also l / h, arrows)
 - Enter:           on a file, focus its diff in the main view; on a
                    branch or commit, drill down
-- Esc:             leave the main view; in Local branches, back up a step
+- Esc:             leave the main view; in Branches, back up a step
 - Tab (main view): switch the staged / unstaged diff
 - j / k:           move within the focused panel (between diff lines in
                    the main view)
@@ -36,6 +36,12 @@ Keys:
 The diff shows staged and unstaged changes separately. When the selection
 has both, the diff title reads "Staged - Unstaged" and s (or Tab in the main
 view) switches between them.
+
+In a GitButler workspace, the same panels follow GitButler: Files shows every
+uncommitted change in one column (GitButler has no staging, so Space and a
+change nothing), [2] Branches lists GitButler's branches with the applied ones
+first, and discard runs `but discard`, so `but undo` brings changes back. Any
+other repository works as plain git.
 
 Review comments, with a diff in the main view focused (0):
 - c:               comment on the diff line under the cursor

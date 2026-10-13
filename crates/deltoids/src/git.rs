@@ -94,6 +94,38 @@ impl Repo {
         self.0.commondir()
     }
 
+    /// The ref `HEAD` points at (`refs/heads/main`), or `None` when `HEAD`
+    /// is detached or unreadable.
+    pub fn head_ref(&self) -> Option<String> {
+        let head = self.0.find_reference("HEAD").ok()?;
+        head.symbolic_target().ok().flatten().map(str::to_string)
+    }
+
+    /// A fingerprint of `HEAD` and every ref's name and target. Two equal
+    /// fingerprints mean no ref moved, appeared, or disappeared between
+    /// the reads.
+    pub fn refs_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hash_ref = |reference: &git2::Reference<'_>| {
+            reference.name_bytes().hash(&mut hasher);
+            reference.symbolic_target_bytes().hash(&mut hasher);
+            reference
+                .target()
+                .map(|oid| oid.to_string())
+                .hash(&mut hasher);
+        };
+        if let Ok(head) = self.0.find_reference("HEAD") {
+            hash_ref(&head);
+        }
+        if let Ok(references) = self.0.references() {
+            for reference in references.flatten() {
+                hash_ref(&reference);
+            }
+        }
+        hasher.finish()
+    }
+
     /// Whether `path` is gitignored. Accepts an absolute path inside the
     /// working tree or a workdir-relative path.
     ///

@@ -4,6 +4,8 @@
 
 use deltoids::{Theme, git};
 
+use crate::cli::browse::vcs::Vcs;
+
 use crate::sidebar::display_path;
 
 use super::diff_pane::DiffPane;
@@ -97,11 +99,11 @@ pub(super) fn reload_working_tree(
     sidebar: &mut Sidebar,
     model: &mut Model,
     last_input: &mut Patches,
-    repo: &git::Repo,
+    vcs: &Vcs,
     theme: &Theme,
     height: usize,
 ) -> ReloadOutcome {
-    let computed = compute_reload(repo, last_input, model);
+    let computed = compute_reload(vcs, last_input, model);
     apply_reload(panes, sidebar, model, last_input, computed, theme, height)
 }
 
@@ -111,17 +113,18 @@ enum Update {
 }
 
 /// Read patch and staging columns together. Column-only changes retain the
-/// model; content or membership changes build a replacement. A stable snapshot
-/// returns `None`. Failed reads leave the caller's current view untouched.
+/// model; content or membership changes, or a switch between split and
+/// single columns, build a replacement. A stable snapshot returns `None`.
+/// Failed reads leave the caller's current view untouched.
 fn compute_reload(
-    repo: &git::Repo,
+    vcs: &Vcs,
     last_input: &Patches,
     model: &Model,
 ) -> Result<Option<Update>, String> {
-    let snapshot = repo.working_tree_snapshot()?;
-    let stages = stage_map(&snapshot.stages);
-    let patches = Patches::of(&snapshot);
-    if !reload_needed(&patches, last_input) {
+    let working = vcs.working_tree()?;
+    let stages = stage_map(&working.snapshot.stages);
+    let patches = Patches::of(&working.snapshot);
+    if !reload_needed(&patches, last_input) && working.columns == model.columns {
         if stages == model.stages {
             return Ok(None);
         }
@@ -131,7 +134,7 @@ fn compute_reload(
             return Ok(Some(Update::Staging(stages)));
         }
     }
-    let model = super::model::build_working_model(&snapshot, repo)?;
+    let model = super::model::build_working_model(&working, vcs.repo())?;
     Ok(Some(Update::Model(patches, model)))
 }
 
@@ -611,21 +614,22 @@ mod tests {
 
         std::fs::write(dir.path().join("file.txt"), "after\n").unwrap();
         raw.blob(b"after\n").unwrap();
-        let repo = git::Repo::discover_at(dir.path()).unwrap();
+        let vcs = Vcs::discover_at(dir.path()).unwrap();
+        let repo = vcs.repo();
         let patch = repo.working_tree_diff().unwrap();
         let model = build_model(
             &patch,
-            Some(&repo),
+            Some(repo),
             stage_map(repo.working_tree_snapshot().unwrap().stages),
         )
         .unwrap();
         let patches = Patches::net(&patch);
-        assert!(compute_reload(&repo, &patches, &model).unwrap().is_none());
+        assert!(compute_reload(&vcs, &patches, &model).unwrap().is_none());
 
         index.read(true).unwrap();
         index.add_path(std::path::Path::new("file.txt")).unwrap();
         index.write().unwrap();
-        let Update::Staging(stages) = compute_reload(&repo, &patches, &model).unwrap().unwrap()
+        let Update::Staging(stages) = compute_reload(&vcs, &patches, &model).unwrap().unwrap()
         else {
             panic!("staging must not rebuild the diff model");
         };

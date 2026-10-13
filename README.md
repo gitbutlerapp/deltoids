@@ -22,7 +22,7 @@ Hunks expand to show the enclosing function, so you always know where you are.
 
 - **Syntax highlighting:** spot code changes at a glance.
 - **Expanded context:** understand changes within their enclosing scope.
-- **Git integration:** review file status and manage changes in one place.
+- **Git and GitButler integration:** review file status and manage changes in one place.
 - **Review comments:** copy review notes with file and line references for coding agents.
 - **Review guidance:** see which changes need attention first.
 - **Responsive TUI:** keep up with changes without unnecessary redraws.

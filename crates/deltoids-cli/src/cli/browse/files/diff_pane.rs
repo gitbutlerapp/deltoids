@@ -1064,6 +1064,7 @@ fn heading(title: PaneTitle, theme: &Theme) -> Line<'static> {
     };
     match title {
         PaneTitle::Diff => Line::from("─[0]─Diff─"),
+        PaneTitle::Uncommitted => Line::from("─[0]─Uncommitted changes─"),
         PaneTitle::One(column) => Line::from(format!("─[0]─{} changes─", label(column))),
         PaneTitle::Both(shown) => {
             let active = Style::default()

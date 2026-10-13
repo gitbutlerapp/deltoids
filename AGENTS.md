@@ -99,7 +99,7 @@ crates/
       workspace/             #   root Mode: lazygit layout, focus, routing
         mod.rs               #     panel stack, keys, mouse, reload
         tests.rs             #     layout and navigation tests
-      history/               #   [2] Local branches panel
+      history/               #   [2] Branches panel (local, or GitButler's)
         mod.rs               #     drill-down to a commit's files, list rendering
         cursor.rs            #     list selection + scroll
       files/                 #   FilesMode (working-tree diff; read-only commit view)
@@ -111,6 +111,13 @@ crates/
         reload.rs            #     working-tree watcher + rebuild
         review.rs            #     review guidance: Jev job, judgments, row notes
         test_support.rs      #     shared test fixtures
+      vcs/                   #   git vs GitButler: the only place they differ
+        mod.rs               #     Vcs (reads) + Writer (stage/discard)
+        git_writes.rs        #     git adapter: index + git CLI writes
+        gitbutler.rs         #     GitButler adapter: `but --json`
+        gitbutler/tests.rs   #     GitButler tests (stub `but`)
+        tests.rs             #     git writer tests
+        fixtures/            #     recorded `but --json` output
     src/cli/tui.rs           # `deltoids tui` entry (requires a terminal)
     src/bin/deltoids.rs      # Single binary dispatcher
 

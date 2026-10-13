@@ -1,5 +1,40 @@
-use super::*;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
 use tempfile::TempDir;
+
+use super::*;
+
+fn toggle_stage(dir: &Path, targets: Vec<PathBuf>) -> Result<String, String> {
+    Writer::at(dir).toggle_stage(targets)
+}
+
+fn toggle_stage_all(dir: &Path) -> Result<String, String> {
+    Writer::at(dir).toggle_stage_all()
+}
+
+fn discard(dir: &Path, targets: Vec<PathBuf>) -> Result<PendingDiscard, String> {
+    Writer::at(dir).discard(targets)
+}
+
+fn complete_discard(
+    dir: &Path,
+    pending: PendingDiscard,
+    kind: DiscardKind,
+) -> Result<String, String> {
+    Writer::at(dir).complete_discard(pending, kind)
+}
+
+/// The discards a pending selection offers.
+fn kinds(pending: &PendingDiscard) -> Vec<DiscardKind> {
+    pending
+        .choices()
+        .iter()
+        .filter(|choice| choice.available)
+        .map(|choice| choice.kind)
+        .collect()
+}
 
 #[test]
 #[ignore = "manual action scaling probe"]
@@ -12,11 +47,10 @@ fn action_scaling_probe() {
         for path in &targets {
             fs::write(dir.path().join(path), "added\n").unwrap();
         }
-        let repo = open(dir.path()).unwrap();
         let start = std::time::Instant::now();
-        let state = read(&repo, &targets, false).unwrap();
+        let state = git_writes::read_selection(dir.path(), &targets).unwrap();
         eprintln!("{count} selected files: preparation={:?}", start.elapsed());
-        assert_eq!(state.changes.len(), count);
+        assert_eq!(state.change_paths().len(), count);
     }
     let dir = fixture();
     let path = dir.path().join("large.bin");
@@ -24,15 +58,8 @@ fn action_scaling_probe() {
     fs::write(&path, vec![0; 64 * 1024 * 1024]).unwrap();
     command(dir.path(), &["add", "large.bin"]);
     let start = std::time::Instant::now();
-    let choice = pending(discard(dir.path(), targets(&["large.bin"])).unwrap());
-    let retained: usize = choice
-        .state
-        .files
-        .iter()
-        .filter_map(|f| f.worktree.as_ref())
-        .filter_map(|(_, hash)| hash.as_ref())
-        .map(std::mem::size_of_val)
-        .sum();
+    let choice = discard(dir.path(), targets(&["large.bin"])).unwrap();
+    let retained = choice.state.retained_hashes();
     eprintln!(
         "64 MiB staged file: menu={:?}, retained content={retained} bytes",
         start.elapsed()
@@ -69,13 +96,6 @@ fn fixture() -> TempDir {
 
 fn targets(paths: &[&str]) -> Vec<PathBuf> {
     paths.iter().map(PathBuf::from).collect()
-}
-
-fn pending(outcome: DiscardOutcome) -> PendingDiscard {
-    match outcome {
-        DiscardOutcome::Choose(p) => p,
-        _ => panic!("expected a discard choice without writes"),
-    }
 }
 
 #[test]
@@ -171,23 +191,23 @@ fn space_twice_stages_then_unstages_without_changing_worktree() {
 fn unstaged_and_staged_discard_require_a_choice() {
     let dir = fixture();
     fs::write(dir.path().join("a.txt"), "edited\n").unwrap();
-    let choice = pending(discard(dir.path(), targets(&["a.txt"])).unwrap());
-    assert_eq!(choice.choices(), &[DiscardKind::All, DiscardKind::Unstaged]);
+    let choice = discard(dir.path(), targets(&["a.txt"])).unwrap();
+    assert_eq!(kinds(&choice), &[DiscardKind::All, DiscardKind::Unstaged]);
     assert_eq!(
         fs::read_to_string(dir.path().join("a.txt")).unwrap(),
         "edited\n"
     );
-    complete_discard(choice, DiscardKind::All).unwrap();
+    complete_discard(dir.path(), choice, DiscardKind::All).unwrap();
     assert_eq!(
         fs::read_to_string(dir.path().join("a.txt")).unwrap(),
         "original\n"
     );
     fs::write(dir.path().join("a.txt"), "staged\n").unwrap();
     command(dir.path(), &["add", "a.txt"]);
-    let choice = pending(discard(dir.path(), targets(&["a.txt"])).unwrap());
-    assert_eq!(choice.choices(), &[DiscardKind::All]);
+    let choice = discard(dir.path(), targets(&["a.txt"])).unwrap();
+    assert_eq!(kinds(&choice), &[DiscardKind::All]);
     assert_eq!(command(dir.path(), &["show", ":a.txt"]), "staged\n");
-    complete_discard(choice, DiscardKind::All).unwrap();
+    complete_discard(dir.path(), choice, DiscardKind::All).unwrap();
     assert!(command(dir.path(), &["status", "--porcelain"]).is_empty());
 }
 
@@ -197,20 +217,20 @@ fn mixed_changes_offer_both_operations_and_unstaged_discard_preserves_index() {
     fs::write(dir.path().join("a.txt"), "staged\n").unwrap();
     command(dir.path(), &["add", "a.txt"]);
     fs::write(dir.path().join("a.txt"), "unstaged\n").unwrap();
-    let choice = pending(discard(dir.path(), targets(&["a.txt"])).unwrap());
-    assert_eq!(choice.choices(), &[DiscardKind::All, DiscardKind::Unstaged]);
+    let choice = discard(dir.path(), targets(&["a.txt"])).unwrap();
+    assert_eq!(kinds(&choice), &[DiscardKind::All, DiscardKind::Unstaged]);
     assert_eq!(
         fs::read_to_string(dir.path().join("a.txt")).unwrap(),
         "unstaged\n"
     );
-    complete_discard(choice, DiscardKind::Unstaged).unwrap();
+    complete_discard(dir.path(), choice, DiscardKind::Unstaged).unwrap();
     assert_eq!(
         fs::read_to_string(dir.path().join("a.txt")).unwrap(),
         "staged\n"
     );
     assert_eq!(command(dir.path(), &["show", ":a.txt"]), "staged\n");
-    let choice = pending(discard(dir.path(), targets(&["a.txt"])).unwrap());
-    complete_discard(choice, DiscardKind::All).unwrap();
+    let choice = discard(dir.path(), targets(&["a.txt"])).unwrap();
+    complete_discard(dir.path(), choice, DiscardKind::All).unwrap();
     assert!(command(dir.path(), &["status", "--porcelain"]).is_empty());
 }
 
@@ -219,12 +239,12 @@ fn cancelling_a_choice_does_not_write_and_changed_content_invalidates_it() {
     let dir = fixture();
     fs::write(dir.path().join("a.txt"), "staged\n").unwrap();
     command(dir.path(), &["add", "a.txt"]);
-    drop(pending(discard(dir.path(), targets(&["a.txt"])).unwrap()));
+    drop(discard(dir.path(), targets(&["a.txt"])).unwrap());
     assert_eq!(command(dir.path(), &["show", ":a.txt"]), "staged\n");
-    let choice = pending(discard(dir.path(), targets(&["a.txt"])).unwrap());
+    let choice = discard(dir.path(), targets(&["a.txt"])).unwrap();
     fs::write(dir.path().join("a.txt"), "new edit\n").unwrap();
     assert!(
-        complete_discard(choice, DiscardKind::All)
+        complete_discard(dir.path(), choice, DiscardKind::All)
             .unwrap_err()
             .contains("Selection changed")
     );
@@ -242,7 +262,7 @@ fn discard_menu_rejects_equal_length_edits_with_preserved_timestamps() {
     fs::write(&path, "staged\n").unwrap();
     command(dir.path(), &["add", "a.txt"]);
     fs::write(&path, "before\n").unwrap();
-    let choice = pending(discard(dir.path(), targets(&["a.txt"])).unwrap());
+    let choice = discard(dir.path(), targets(&["a.txt"])).unwrap();
     let modified = fs::metadata(&path).unwrap().modified().unwrap();
     fs::write(&path, "after!\n").unwrap();
     fs::File::options()
@@ -252,7 +272,7 @@ fn discard_menu_rejects_equal_length_edits_with_preserved_timestamps() {
         .set_times(fs::FileTimes::new().set_modified(modified))
         .unwrap();
     assert!(
-        complete_discard(choice, DiscardKind::All)
+        complete_discard(dir.path(), choice, DiscardKind::All)
             .unwrap_err()
             .contains("Selection changed")
     );
@@ -265,7 +285,7 @@ fn unstaged_menu_rejects_equal_length_edits_with_preserved_timestamps() {
     let dir = fixture();
     let path = dir.path().join("a.txt");
     fs::write(&path, "before!\n").unwrap();
-    let choice = pending(discard(dir.path(), targets(&["a.txt"])).unwrap());
+    let choice = discard(dir.path(), targets(&["a.txt"])).unwrap();
     let modified = fs::metadata(&path).unwrap().modified().unwrap();
     fs::write(&path, "after!!\n").unwrap();
     fs::File::options()
@@ -275,7 +295,7 @@ fn unstaged_menu_rejects_equal_length_edits_with_preserved_timestamps() {
         .set_times(fs::FileTimes::new().set_modified(modified))
         .unwrap();
     assert!(
-        complete_discard(choice, DiscardKind::Unstaged)
+        complete_discard(dir.path(), choice, DiscardKind::Unstaged)
             .unwrap_err()
             .contains("Selection changed")
     );
@@ -297,7 +317,8 @@ fn deletion_and_addition_toggle_without_affecting_other_files() {
         "new\n"
     );
     complete_discard(
-        pending(discard(dir.path(), targets(&["a.txt", "new.txt"])).unwrap()),
+        dir.path(),
+        discard(dir.path(), targets(&["a.txt", "new.txt"])).unwrap(),
         DiscardKind::All,
     )
     .unwrap();
@@ -322,8 +343,8 @@ fn unborn_head_supports_stage_unstage_and_discard() {
     assert_eq!(command(dir.path(), &["ls-files"]), "");
     assert!(dir.path().join("new.txt").exists());
     toggle_stage(dir.path(), targets(&["new.txt"])).unwrap();
-    let choice = pending(discard(dir.path(), targets(&["new.txt"])).unwrap());
-    complete_discard(choice, DiscardKind::All).unwrap();
+    let choice = discard(dir.path(), targets(&["new.txt"])).unwrap();
+    complete_discard(dir.path(), choice, DiscardKind::All).unwrap();
     assert!(!dir.path().join("new.txt").exists());
     assert!(command(dir.path(), &["status", "--porcelain"]).is_empty());
 }
@@ -333,10 +354,10 @@ fn rename_chain_can_be_staged_unstaged_and_discarded_by_its_final_name() {
     let dir = fixture();
     command(dir.path(), &["mv", "a.txt", "middle.txt"]);
     fs::rename(dir.path().join("middle.txt"), dir.path().join("final.txt")).unwrap();
-    let choice = pending(discard(dir.path(), targets(&["final.txt"])).unwrap());
+    let choice = discard(dir.path(), targets(&["final.txt"])).unwrap();
     assert_eq!(choice.label(), "final.txt");
-    assert_eq!(choice.choices(), &[DiscardKind::All, DiscardKind::Unstaged]);
-    complete_discard(choice, DiscardKind::Unstaged).unwrap();
+    assert_eq!(kinds(&choice), &[DiscardKind::All, DiscardKind::Unstaged]);
+    complete_discard(dir.path(), choice, DiscardKind::Unstaged).unwrap();
     assert!(dir.path().join("middle.txt").exists());
     assert!(!dir.path().join("final.txt").exists());
     fs::rename(dir.path().join("middle.txt"), dir.path().join("final.txt")).unwrap();
@@ -345,7 +366,8 @@ fn rename_chain_can_be_staged_unstaged_and_discarded_by_its_final_name() {
     toggle_stage(dir.path(), targets(&["final.txt"])).unwrap();
     assert_eq!(command(dir.path(), &["ls-files"]), "a.txt\n");
     complete_discard(
-        pending(discard(dir.path(), targets(&["a.txt", "final.txt"])).unwrap()),
+        dir.path(),
+        discard(dir.path(), targets(&["a.txt", "final.txt"])).unwrap(),
         DiscardKind::All,
     )
     .unwrap();
@@ -360,9 +382,9 @@ fn mixed_directory_selection_offers_choices_without_mutating_siblings() {
     command(dir.path(), &["add", "a.txt"]);
     fs::write(dir.path().join("new.txt"), "new\n").unwrap();
     fs::write(dir.path().join("keep.txt"), "keep\n").unwrap();
-    let choice = pending(discard(dir.path(), targets(&["a.txt", "new.txt"])).unwrap());
-    assert_eq!(choice.choices().len(), 2);
-    complete_discard(choice, DiscardKind::Unstaged).unwrap();
+    let choice = discard(dir.path(), targets(&["a.txt", "new.txt"])).unwrap();
+    assert_eq!(kinds(&choice).len(), 2);
+    complete_discard(dir.path(), choice, DiscardKind::Unstaged).unwrap();
     assert_eq!(command(dir.path(), &["show", ":a.txt"]), "staged\n");
     assert!(!dir.path().join("new.txt").exists());
     assert!(dir.path().join("keep.txt").exists());
@@ -386,7 +408,8 @@ fn literal_paths_and_binary_content_survive_staging() {
     toggle_stage(dir.path(), targets(&names)).unwrap();
     assert_eq!(command(dir.path(), &["ls-files"]), "a.txt\n");
     complete_discard(
-        pending(discard(dir.path(), targets(&names)).unwrap()),
+        dir.path(),
+        discard(dir.path(), targets(&names)).unwrap(),
         DiscardKind::All,
     )
     .unwrap();
@@ -398,10 +421,10 @@ fn literal_paths_and_binary_content_survive_staging() {
 #[test]
 fn clean_selection_has_no_available_discard_actions() {
     let dir = fixture();
-    let choice = pending(discard(dir.path(), targets(&["a.txt"])).unwrap());
-    assert!(choice.choices().is_empty());
+    let choice = discard(dir.path(), targets(&["a.txt"])).unwrap();
+    assert!(kinds(&choice).is_empty());
     assert!(
-        complete_discard(choice, DiscardKind::All)
+        complete_discard(dir.path(), choice, DiscardKind::All)
             .unwrap_err()
             .contains("unavailable")
     );
@@ -417,7 +440,8 @@ fn symlink_discard_never_follows_the_target_and_restores_type_changes() {
     fs::remove_file(dir.path().join("a.txt")).unwrap();
     symlink(external.path().join("target"), dir.path().join("a.txt")).unwrap();
     complete_discard(
-        pending(discard(dir.path(), targets(&["a.txt"])).unwrap()),
+        dir.path(),
+        discard(dir.path(), targets(&["a.txt"])).unwrap(),
         DiscardKind::All,
     )
     .unwrap();
@@ -435,7 +459,8 @@ fn symlink_discard_never_follows_the_target_and_restores_type_changes() {
     );
     symlink(external.path().join("target"), dir.path().join("new-link")).unwrap();
     complete_discard(
-        pending(discard(dir.path(), targets(&["new-link"])).unwrap()),
+        dir.path(),
+        discard(dir.path(), targets(&["new-link"])).unwrap(),
         DiscardKind::All,
     )
     .unwrap();
@@ -500,7 +525,8 @@ fn discard_restores_executable_mode() {
     let path = dir.path().join("a.txt");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     complete_discard(
-        pending(discard(dir.path(), targets(&["a.txt"])).unwrap()),
+        dir.path(),
+        discard(dir.path(), targets(&["a.txt"])).unwrap(),
         DiscardKind::All,
     )
     .unwrap();
@@ -528,7 +554,8 @@ fn discard_uses_git_checkout_filters() {
     command(dir.path(), &["commit", "-qm", "filtered fixture"]);
     fs::write(dir.path().join("filtered.txt"), "visible edit\n").unwrap();
     complete_discard(
-        pending(discard(dir.path(), targets(&["filtered.txt"])).unwrap()),
+        dir.path(),
+        discard(dir.path(), targets(&["filtered.txt"])).unwrap(),
         DiscardKind::All,
     )
     .unwrap();
@@ -545,7 +572,7 @@ fn discard_uses_git_checkout_filters() {
 #[test]
 fn conflicts_reject_the_complete_selection_before_any_writes() {
     let dir = fixture();
-    let repo = open(dir.path()).unwrap();
+    let repo = git2::Repository::open(dir.path()).unwrap();
     let mut index = repo.index().unwrap();
     let entries: Vec<_> = (1..=3)
         .map(|_| index.get_path(Path::new("a.txt"), 0).unwrap())

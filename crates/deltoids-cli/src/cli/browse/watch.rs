@@ -357,6 +357,8 @@ mod tests {
             "objects/ab/cd",
             "logs/HEAD",
             "refs/heads/main.lock",
+            "gitbutler/gitbutler.write-lock",
+            "gitbutler/but.sqlite",
         ] {
             assert!(
                 !path_warrants_reload(&repo, &[repo.git_dir().join(path)]),

@@ -55,10 +55,10 @@ use super::comment_view::render_comment_editor;
 use super::comments::{CommentAnchor, CommentStore, reanchor, review_text};
 use super::mode::{AppCommand, BackgroundWork, DrawBudget, Mode, Viewport};
 use super::panel::{self, panel_title};
+use super::vcs::{PendingDiscard, Vcs};
 use deltoids::render_tui::pane_border_color;
 
 mod action_menu;
-mod actions;
 mod diff_pane;
 #[cfg(test)]
 mod interaction_tests;
@@ -87,6 +87,14 @@ use stage_panes::{PaneSpec, PaneTitle, StagePanes};
 pub(super) enum Focus {
     Sidebar,
     Diff,
+}
+
+/// What a finished stage or discard job hands back.
+enum ActionOutcome {
+    /// The write ran; the status-line message.
+    Applied(String),
+    /// A discard read its selection and waits for the user's choice.
+    Choose(PendingDiscard),
 }
 
 /// Whether the diff pane is being browsed or a comment is being typed.
@@ -148,8 +156,8 @@ pub(super) struct FilesMode {
     status: Option<String>,
     /// The owned data: resolved files plus their diffs.
     model: Model,
-    /// The repo (for blob resolution and working-tree reload), if any.
-    repo: Option<git::Repo>,
+    /// The repository (for blob resolution, reload, and writes), if any.
+    vcs: Option<Vcs>,
     /// True while a repo-backed startup is still resolving its first diff
     /// (the initial build lost a race): the pane shows "Loading…" and the
     /// first successful reload promotes it to a live view. `loading_since`
@@ -167,7 +175,7 @@ pub(super) struct FilesMode {
     /// Keeps the bounded filesystem watcher alive for the session.
     _watcher: Option<ChangeWatcher>,
     reload_failed: bool,
-    action_job: Option<std::sync::mpsc::Receiver<Result<actions::DiscardOutcome, String>>>,
+    action_job: Option<std::sync::mpsc::Receiver<Result<ActionOutcome, String>>>,
     refresh_requested: bool,
     review: review::Review,
     guidance: review::Guidance,
@@ -197,20 +205,20 @@ impl FilesMode {
     ) -> Self {
         // Not a repo: degrade to the static empty state so the TUI still
         // opens.
-        let Some(repo) = git::Repo::discover_at(path) else {
+        let Some(vcs) = Vcs::discover_at(path) else {
             return Self::empty(theme, initial_diff_width);
         };
         // Watch before the snapshot so edits during the build stay pending.
-        let watcher = crate::cli::browse::watch::spawn_workdir_watcher(&repo)
+        let watcher = crate::cli::browse::watch::spawn_workdir_watcher(vcs.repo())
             .ok()
             .flatten();
-        let mut mode = match Self::try_model(&repo) {
-            Ok((input, model)) => Self::new(model, input, Some(repo), theme, initial_diff_width),
+        let mut mode = match Self::try_model(&vcs) {
+            Ok((input, model)) => Self::new(model, input, Some(vcs), theme, initial_diff_width),
             // A repo-backed build lost a race (a size-check or content
             // race). Rather than a static error screen, open a reloadable
             // "Loading…" mode; explicit retries and the first
             // stable tick promotes it to a live diff.
-            Err(_) => Self::loading(repo, theme, initial_diff_width),
+            Err(_) => Self::loading(vcs, theme, initial_diff_width),
         };
         mode._watcher = watcher;
         mode.review = review::Review::from_env();
@@ -285,16 +293,16 @@ impl FilesMode {
     /// Where the working tree's repository lives, for opening it again
     /// (history reads it on its own handle). `None` without a repo.
     pub(super) fn repo_dir(&self) -> Option<PathBuf> {
-        let repo = self.repo.as_ref()?;
+        let repo = self.vcs.as_ref()?.repo();
         Some(repo.workdir().unwrap_or(repo.git_dir()).to_path_buf())
     }
 
     /// Compute the working-tree diff and its model, or an error when the
     /// diff read or model build loses a race with on-disk churn.
-    fn try_model(repo: &git::Repo) -> Result<(Patches, Model), String> {
-        let snapshot = repo.working_tree_snapshot()?;
-        let model = model::build_working_model(&snapshot, repo)?;
-        Ok((Patches::of(&snapshot), model))
+    fn try_model(vcs: &Vcs) -> Result<(Patches, Model), String> {
+        let working = vcs.working_tree()?;
+        let model = model::build_working_model(&working, vcs.repo())?;
+        Ok((Patches::of(&working.snapshot), model))
     }
 
     /// A cheap empty Files mode: no repo, no diff, static. Used as the
@@ -311,8 +319,8 @@ impl FilesMode {
     /// [`FilesMode::reload`] promotes it out of Loading, or degrades it to
     /// the static error state once failures persist past
     /// [`STARTUP_LOADING_TIMEOUT`].
-    fn loading(repo: git::Repo, theme: &Theme, width: usize) -> Self {
-        let mut mode = Self::new(Model::empty(), Patches::default(), Some(repo), theme, width);
+    fn loading(vcs: Vcs, theme: &Theme, width: usize) -> Self {
+        let mut mode = Self::new(Model::empty(), Patches::default(), Some(vcs), theme, width);
         mode.startup_pending = true;
         mode.loading_since = Some(Instant::now());
         mode.unstaged.set_empty_loading();
@@ -330,13 +338,7 @@ impl FilesMode {
         mode
     }
 
-    fn new(
-        model: Model,
-        input: Patches,
-        repo: Option<git::Repo>,
-        theme: &Theme,
-        width: usize,
-    ) -> Self {
+    fn new(model: Model, input: Patches, vcs: Option<Vcs>, theme: &Theme, width: usize) -> Self {
         let sidebar = build_sidebar(&model, theme);
         let display_order = sidebar.display_order();
         let panes = StagePanes::new(&model, &display_order);
@@ -355,7 +357,7 @@ impl FilesMode {
             input: InputState::Normal,
             status: None,
             model,
-            repo,
+            vcs,
             startup_pending: false,
             loading_since: None,
             last_input: input,
@@ -616,33 +618,29 @@ fn start_stage_all(state: &mut FilesMode) {
     if state.action_job.is_some() {
         return;
     }
-    let Some(workdir) = state
-        .repo
-        .as_ref()
-        .and_then(|r| r.workdir())
-        .map(PathBuf::from)
-    else {
+    let Some(writer) = state.vcs.as_ref().and_then(Vcs::writer) else {
         state.status = Some("Git actions require a working tree".into());
         return;
     };
     state.status = Some("Updating staging for all files…".into());
     spawn_action(state, move || {
-        actions::toggle_stage_all(&workdir).map(actions::DiscardOutcome::Applied)
+        writer.toggle_stage_all().map(ActionOutcome::Applied)
     });
 }
 
 fn start_action(state: &mut FilesMode, stage: bool) {
+    let placeholders = Vcs::discard_placeholders(state.vcs.as_ref());
     if !stage {
         state.input = InputState::Discarding {
-            menu: action_menu::DiscardMenu::Checking,
-            selected: 2,
+            selected: placeholders.len(),
+            menu: action_menu::DiscardMenu::Checking(placeholders.clone()),
         };
     }
     let unavailable = |state: &mut FilesMode, reason: &str| {
         if !stage {
             state.input = InputState::Discarding {
-                menu: action_menu::DiscardMenu::Unavailable(reason.into()),
-                selected: 2,
+                selected: placeholders.len(),
+                menu: action_menu::DiscardMenu::Unavailable(placeholders.clone(), reason.into()),
             };
         }
     };
@@ -657,12 +655,7 @@ fn start_action(state: &mut FilesMode, stage: bool) {
         unavailable(state, "No files selected");
         return;
     };
-    let Some(workdir) = state
-        .repo
-        .as_ref()
-        .and_then(|r| r.workdir())
-        .map(PathBuf::from)
-    else {
+    let Some(writer) = state.vcs.as_ref().and_then(Vcs::writer) else {
         let reason = "Git actions require a working tree";
         unavailable(state, reason);
         if stage {
@@ -692,16 +685,16 @@ fn start_action(state: &mut FilesMode, stage: bool) {
     spawn_action(state, move || {
         let targets = targets.into_iter().collect();
         if stage {
-            actions::toggle_stage(&workdir, targets).map(actions::DiscardOutcome::Applied)
+            writer.toggle_stage(targets).map(ActionOutcome::Applied)
         } else {
-            actions::discard(&workdir, targets)
+            writer.discard(targets).map(ActionOutcome::Choose)
         }
     });
 }
 
 fn spawn_action(
     state: &mut FilesMode,
-    action: impl FnOnce() -> Result<actions::DiscardOutcome, String> + Send + 'static,
+    action: impl FnOnce() -> Result<ActionOutcome, String> + Send + 'static,
 ) {
     let (sender, receiver) = std::sync::mpsc::channel();
     state.action_job = Some(receiver);
@@ -723,30 +716,32 @@ fn collect_action(state: &mut FilesMode) -> bool {
     state.action_job = None;
     state.status = None;
     match result {
-        Ok(actions::DiscardOutcome::Choose(pending)) => {
+        Ok(ActionOutcome::Choose(pending)) => {
             if let InputState::Discarding {
-                menu: menu @ action_menu::DiscardMenu::Checking,
+                menu: menu @ action_menu::DiscardMenu::Checking(_),
                 selected,
             } = &mut state.input
             {
-                *selected = actions::DiscardKind::ALL
+                let choices = pending.choices();
+                *selected = choices
                     .iter()
-                    .position(|kind| pending.is_available(*kind))
-                    .unwrap_or(2);
+                    .position(|choice| choice.available)
+                    .unwrap_or(choices.len());
                 *menu = action_menu::DiscardMenu::Ready(pending);
             }
         }
-        Ok(actions::DiscardOutcome::Applied(message)) => {
+        Ok(ActionOutcome::Applied(message)) => {
             state.status = (!message.is_empty()).then_some(message);
             state.refresh_requested = true;
         }
         Err(message) => {
-            if let InputState::Discarding {
-                menu: menu @ action_menu::DiscardMenu::Checking,
-                ..
-            } = &mut state.input
+            if let InputState::Discarding { menu, .. } = &mut state.input
+                && let action_menu::DiscardMenu::Checking(placeholders) = menu
             {
-                *menu = action_menu::DiscardMenu::Unavailable(message.clone());
+                *menu = action_menu::DiscardMenu::Unavailable(
+                    std::mem::take(placeholders),
+                    message.clone(),
+                );
             }
             state.status = Some(format!("Git action failed: {message}"));
             state.refresh_requested = true;
@@ -759,25 +754,30 @@ fn handle_discard_key(state: &mut FilesMode, key: KeyCode) -> AppCommand {
     let InputState::Discarding { menu, selected } = &mut state.input else {
         return AppCommand::Continue;
     };
-    let cancel = actions::DiscardKind::ALL.len();
+    let cancel = menu.choices().len();
     match key {
         KeyCode::Char('j') | KeyCode::Down => *selected = (*selected + 1).min(cancel),
         KeyCode::Char('k') | KeyCode::Up => *selected = selected.saturating_sub(1),
         KeyCode::Esc => state.input = InputState::Normal,
         KeyCode::Enter => {
-            let kind = actions::DiscardKind::ALL.get(*selected).copied();
-            if kind.is_some_and(|kind| !menu.is_available(kind)) {
+            let choice = menu.choices().get(*selected);
+            if choice.is_some_and(|choice| !choice.available) {
                 return AppCommand::Continue;
             }
+            let kind = choice.map(|choice| choice.kind);
+            let writer = state.vcs.as_ref().and_then(Vcs::writer);
             if let InputState::Discarding {
                 menu: action_menu::DiscardMenu::Ready(pending),
                 ..
             } = std::mem::replace(&mut state.input, InputState::Normal)
                 && let Some(kind) = kind
+                && let Some(writer) = writer
             {
                 state.status = Some("Discarding changes…".into());
                 spawn_action(state, move || {
-                    actions::complete_discard(pending, kind).map(actions::DiscardOutcome::Applied)
+                    writer
+                        .complete_discard(pending, kind)
+                        .map(ActionOutcome::Applied)
                 });
             }
         }
@@ -1243,7 +1243,7 @@ impl Mode for FilesMode {
     }
 
     fn watch(&mut self) -> Result<Option<ChangeReceiver>, String> {
-        let Some(repo) = self.repo.as_ref() else {
+        let Some(repo) = self.vcs.as_ref().map(Vcs::repo) else {
             return Ok(None);
         };
         if !self
@@ -1260,9 +1260,9 @@ impl Mode for FilesMode {
     }
 
     fn should_reload(&self, paths: &[PathBuf]) -> bool {
-        self.repo
+        self.vcs
             .as_ref()
-            .is_some_and(|repo| path_warrants_reload(repo, paths))
+            .is_some_and(|vcs| path_warrants_reload(vcs.repo(), paths))
     }
 
     fn retry_reload(&self) -> bool {
@@ -1270,16 +1270,16 @@ impl Mode for FilesMode {
     }
 
     fn reload(&mut self, viewport: Viewport, theme: &Theme) -> Result<bool, String> {
-        let Some(repo) = self.repo.as_ref() else {
+        let Some(vcs) = self.vcs.as_ref() else {
             return Ok(false);
         };
-        // `repo` borrows `self.repo`; the rest are disjoint fields.
+        // `vcs` borrows `self.vcs`; the rest are disjoint fields.
         let outcome = reload_working_tree(
             [&mut self.staged, &mut self.unstaged],
             &mut self.sidebar,
             &mut self.model,
             &mut self.last_input,
-            repo,
+            vcs,
             theme,
             viewport.height,
         );
@@ -1322,7 +1322,7 @@ impl Mode for FilesMode {
         let idx = self.sidebar.nearest_file_index()?;
         let file = &self.model.files.get(idx)?.file;
         let rel = crate::sidebar::display_path(file);
-        let workdir = self.repo.as_ref()?.workdir()?;
+        let workdir = self.vcs.as_ref()?.repo().workdir()?;
         Some(workdir.join(rel))
     }
 }
@@ -2258,10 +2258,15 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "world\n").unwrap();
         stage_all(&repo);
 
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
-        let input = wrapper.working_tree_diff().unwrap();
-        let model = build_model(&input, Some(&wrapper), std::collections::HashMap::new()).unwrap();
-        let expected = wrapper.workdir().unwrap().join("a.txt");
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
+        let input = wrapper.repo().working_tree_diff().unwrap();
+        let model = build_model(
+            &input,
+            Some(wrapper.repo()),
+            std::collections::HashMap::new(),
+        )
+        .unwrap();
+        let expected = wrapper.repo().workdir().unwrap().join("a.txt");
         let state = FilesMode::new(
             model,
             Patches::net(&input),
@@ -2290,7 +2295,7 @@ mod tests {
         commit_index(&raw, "initial");
         std::fs::write(dir.path().join("a.txt"), "after\n").unwrap();
         raw.blob(b"after\n").unwrap();
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         let (input, model) = FilesMode::try_model(&wrapper).unwrap();
         let theme = theme();
         let mut mode = FilesMode::new(model, input.clone(), Some(wrapper), &theme, 80);
@@ -2315,7 +2320,7 @@ mod tests {
         commit_index(&raw, "initial");
         std::fs::write(dir.path().join("a.txt"), "after\n").unwrap();
         raw.blob(b"after\n").unwrap();
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         let (input, model) = FilesMode::try_model(&wrapper).unwrap();
         let stages = model.stages.clone();
         let theme = theme();
@@ -2343,7 +2348,7 @@ mod tests {
         let path = raw.path().join(raw.head().unwrap().name().unwrap());
         let original = std::fs::read(&path).unwrap();
         std::fs::write(&path, "not-an-object-id\n").unwrap();
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         assert!(FilesMode::try_model(&wrapper).is_err());
         let theme = theme();
         let mut mode = FilesMode::loading(wrapper, &theme, 80);
@@ -2369,11 +2374,11 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "world\n").unwrap();
         stage_all(&repo);
 
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         let theme = Theme::default();
         let mut mode = FilesMode::loading(wrapper, &theme, 80);
 
-        assert!(mode.repo.is_some(), "loading mode must be reloadable");
+        assert!(mode.vcs.is_some(), "loading mode must be reloadable");
         assert!(mode.startup_pending, "loading mode is pending");
         assert!(mode.model.files.is_empty(), "loading mode has no files yet");
 
@@ -2401,7 +2406,7 @@ mod tests {
         stage_all(&repo);
         commit_index(&repo, "init");
 
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         let theme = Theme::default();
         let mut mode = FilesMode::loading(wrapper, &theme, 80);
 
@@ -2411,14 +2416,14 @@ mod tests {
             !mode.startup_pending,
             "a confirmed clean tree leaves Loading"
         );
-        assert!(mode.repo.is_some(), "a clean tree is still watchable");
+        assert!(mode.vcs.is_some(), "a clean tree is still watchable");
     }
 
     #[test]
     fn loading_mode_keeps_loading_on_failure_within_window() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         let theme = Theme::default();
         let mut mode = FilesMode::loading(wrapper, &theme, 80);
 
@@ -2430,14 +2435,14 @@ mod tests {
         );
         assert!(!changed);
         assert!(mode.startup_pending, "a fresh failure keeps Loading");
-        assert!(mode.repo.is_some(), "a fresh failure stays reloadable");
+        assert!(mode.vcs.is_some(), "a fresh failure stays reloadable");
     }
 
     #[test]
     fn loading_mode_degrades_to_error_after_window() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        let wrapper = git::Repo::discover_at(dir.path()).unwrap();
+        let wrapper = Vcs::discover_at(dir.path()).unwrap();
         let theme = Theme::default();
         let mut mode = FilesMode::loading(wrapper, &theme, 80);
 
@@ -2452,7 +2457,7 @@ mod tests {
         );
         assert!(changed, "the error state requires a repaint");
         assert!(
-            mode.repo.is_none(),
+            mode.vcs.is_none(),
             "a failure that persists past the window degrades to a static error"
         );
         assert!(

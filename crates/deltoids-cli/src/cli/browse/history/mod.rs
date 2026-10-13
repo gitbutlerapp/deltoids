@@ -1,6 +1,7 @@
-//! The local-branches panel, in the spirit of lazygit's.
+//! The branches panel, in the spirit of lazygit's.
 //!
-//! [`History`] lists every local branch, the checked-out one first; the
+//! [`History`] lists the branches [`Vcs::branches`] gives (local
+//! branches, or a GitButler workspace's branches), the current ones first; the
 //! main view shows the selected branch's log. `Enter` lists the branch's
 //! commits in the same panel, newest first and loaded a page at a time,
 //! and the main view previews the selected commit's diff. `Enter` again
@@ -32,6 +33,7 @@ use super::diff_scrollbar;
 use super::files::FilesMode;
 use super::mode::{AppCommand, BackgroundWork, DrawBudget};
 use super::panel::{Panel, panel_title};
+use super::vcs::{Branch, Vcs};
 
 mod cursor;
 
@@ -48,9 +50,9 @@ enum Screen {
     Commit,
 }
 
-/// The commits reachable from one revision, loaded a page at a time.
+/// The commits of one branch, loaded a page at a time.
 struct CommitList {
-    rev: String,
+    branch: Branch,
     label: String,
     commits: Result<Vec<git::Commit>, String>,
     /// Whether the last load returned fewer commits than it asked for.
@@ -59,11 +61,11 @@ struct CommitList {
 }
 
 impl CommitList {
-    fn load(repo: &git::Repo, rev: String, label: String) -> Self {
-        let commits = repo.commits(&rev, PAGE);
+    fn load(vcs: &Vcs, branch: Branch, label: String) -> Self {
+        let commits = vcs.commits(&branch, PAGE);
         Self {
             exhausted: commits.as_ref().map_or(true, |c| c.len() < PAGE),
-            rev,
+            branch,
             label,
             commits,
             cursor: Cursor::default(),
@@ -79,12 +81,12 @@ impl CommitList {
     }
 
     /// Load the next page once the selection reaches the last commit.
-    fn load_more(&mut self, repo: &git::Repo) {
+    fn load_more(&mut self, vcs: &Vcs) {
         if self.exhausted || self.cursor.selected + 1 < self.len() {
             return;
         }
         let want = self.len() + PAGE;
-        if let Ok(more) = repo.commits(&self.rev, want) {
+        if let Ok(more) = vcs.commits(&self.branch, want) {
             self.exhausted = more.len() < want;
             self.commits = Ok(more);
         }
@@ -92,10 +94,10 @@ impl CommitList {
 
     /// Re-read as many commits as are loaded, keeping the selection on
     /// the same commit when it is still there.
-    fn refresh(&mut self, repo: &git::Repo) {
+    fn refresh(&mut self, vcs: &Vcs) {
         let selected = self.selected().map(|c| c.id.clone());
         let want = self.len().max(PAGE);
-        self.commits = repo.commits(&self.rev, want);
+        self.commits = vcs.commits(&self.branch, want);
         self.exhausted = self.len() < want;
         if let Some(index) = selected.and_then(|id| {
             let commits = self.commits.as_ref().ok()?;
@@ -121,10 +123,12 @@ struct Chrome {
 }
 
 pub(super) struct History {
-    repo: git::Repo,
+    vcs: Vcs,
     screen: Screen,
     main_focused: bool,
-    branches: Result<Vec<git::Branch>, String>,
+    /// The branch list's title.
+    label: &'static str,
+    branches: Result<Vec<Branch>, String>,
     branch_cursor: Cursor,
     /// Each branch's log for the branches screen's main view.
     logs: HashMap<String, Result<Vec<git::Commit>, String>>,
@@ -142,11 +146,13 @@ pub(super) struct History {
 }
 
 impl History {
-    /// The local-branches panel.
-    pub(super) fn branches(repo: git::Repo) -> Self {
+    /// The branches panel.
+    pub(super) fn branches(mut vcs: Vcs) -> Self {
+        let list = vcs.branches();
         Self {
-            branches: repo.local_branches(),
-            repo,
+            label: list.label,
+            branches: list.branches,
+            vcs,
             screen: Screen::Branches,
             main_focused: false,
             branch_cursor: Cursor::default(),
@@ -167,7 +173,9 @@ impl History {
     pub(super) fn refresh(&mut self) {
         self.now = now();
         let selected = self.selected_branch().map(|b| b.name.clone());
-        self.branches = self.repo.local_branches();
+        let list = self.vcs.branches();
+        self.label = list.label;
+        self.branches = list.branches;
         if let Some(index) = selected.and_then(|name| {
             let branches = self.branches.as_ref().ok()?;
             branches.iter().position(|b| b.name == name)
@@ -176,7 +184,7 @@ impl History {
         }
         self.logs.clear();
         if let Some(list) = self.commits.as_mut() {
-            list.refresh(&self.repo);
+            list.refresh(&self.vcs);
         }
     }
 
@@ -184,7 +192,7 @@ impl History {
         self.branches.as_ref().map_or(0, Vec::len)
     }
 
-    fn selected_branch(&self) -> Option<&git::Branch> {
+    fn selected_branch(&self) -> Option<&Branch> {
         self.branches
             .as_ref()
             .ok()?
@@ -224,7 +232,7 @@ impl History {
             return;
         }
         self.commit = Some(CommitView {
-            view: FilesMode::commit(&self.repo, &selected, theme, self.diff_width),
+            view: FilesMode::commit(self.vcs.repo(), &selected, theme, self.diff_width),
             id: selected.id,
         });
         self.sync_focus();
@@ -245,12 +253,16 @@ impl History {
     }
 
     fn open_branch_commits(&mut self) {
-        let Some(branch) = self.selected_branch().map(|b| b.name.clone()) else {
+        let Some(branch) = self.selected_branch().cloned() else {
             return;
         };
-        if self.commits.as_ref().is_none_or(|list| list.rev != branch) {
-            let label = format!("Commits ({branch})");
-            self.commits = Some(CommitList::load(&self.repo, branch, label));
+        if self
+            .commits
+            .as_ref()
+            .is_none_or(|list| list.branch.name != branch.name)
+        {
+            let label = format!("Commits ({})", branch.name);
+            self.commits = Some(CommitList::load(&self.vcs, branch, label));
         }
         self.set_screen(Screen::Commits);
     }
@@ -274,7 +286,7 @@ impl History {
                 if let Some(list) = self.commits.as_mut() {
                     let len = list.len();
                     list.cursor.handle_key(key, len, height);
-                    list.load_more(&self.repo);
+                    list.load_more(&self.vcs);
                 }
             }
             Screen::Commit => {}
@@ -302,12 +314,12 @@ impl History {
 
     /// The selected branch's log, loaded on first view.
     fn branch_log(&mut self) -> Option<&Result<Vec<git::Commit>, String>> {
-        let name = self.selected_branch()?.name.clone();
-        let repo = &self.repo;
+        let branch = self.selected_branch()?.clone();
+        let vcs = &self.vcs;
         Some(
             self.logs
-                .entry(name.clone())
-                .or_insert_with(|| repo.commits(&name, PAGE)),
+                .entry(branch.name.clone())
+                .or_insert_with(|| vcs.commits(&branch, PAGE)),
         )
     }
 
@@ -424,7 +436,7 @@ impl History {
                 if let Some(list) = self.commits.as_mut() {
                     let len = list.len();
                     list.cursor.click(offset, len);
-                    list.load_more(&self.repo);
+                    list.load_more(&self.vcs);
                 }
             }
             Screen::Commit => {}
@@ -453,7 +465,7 @@ impl Panel for History {
             Screen::Branches => {
                 let color = pane_border_color(focused, theme);
                 let chrome = Chrome {
-                    title: panel_title(color, number, "Local branches", theme),
+                    title: panel_title(color, number, self.label, theme),
                     footer: None,
                     focused,
                 };
@@ -657,10 +669,10 @@ fn draw_list(
     );
 }
 
-/// `  2d * main`: the tip's age, a star on the checked-out branch.
-fn branch_row(branch: &git::Branch, now: i64, theme: &Theme) -> Line<'static> {
+/// `  2d * main`: the tip's age, a star on the current branch.
+fn branch_row(branch: &Branch, now: i64, theme: &Theme) -> Line<'static> {
     let muted = Style::default().fg(rgb_to_color(theme.muted));
-    let (marker, name) = if branch.head {
+    let (marker, name) = if branch.current {
         (
             "* ",
             Style::default()

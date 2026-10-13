@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - review: hold Ctrl or Shift and scroll over the diff to step through the files in the sidebar, like the TUI.
 - TUI: the Files sidebar tags each file with its kind of change and an attention dot and mutes tests, comment-only changes, import-only changes, and lockfiles. Press `f` to hide low-value files. Tags end in `!` for changes that break callers. With `TYPESAFE_API_KEY` set, TypeSafe's Jev model judges every hunk, and hunk headers show its tag.
 - TUI: tag changes to agent instructions, skills, and prompt files as `agents`.
+- TUI: support GitButler workspaces. Files shows all uncommitted changes in one column, Branches lists GitButler's branches with applied ones first, and discard goes through `but`, so `but undo` brings changes back.
 
 ### Changed
 

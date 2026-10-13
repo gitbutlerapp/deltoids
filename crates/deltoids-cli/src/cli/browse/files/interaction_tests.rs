@@ -23,18 +23,18 @@ fn fixture(paths: &[&str]) -> (TempDir, git2::Repository) {
 }
 
 fn live(dir: &Path) -> FilesMode {
-    let repo = git::Repo::discover_at(dir).unwrap();
+    let vcs = Vcs::discover_at(dir).unwrap();
     // Keep content resolution independent of the process cwd shared by parallel tests.
     let raw = git2::Repository::open(dir).unwrap();
-    for status in repo.working_tree_snapshot().unwrap().stages {
+    for status in vcs.repo().working_tree_snapshot().unwrap().stages {
         for path in status.paths {
             if let Ok(bytes) = fs::read(dir.join(path)) {
                 raw.blob(&bytes).unwrap();
             }
         }
     }
-    let (input, model) = FilesMode::try_model(&repo).unwrap();
-    FilesMode::new(model, input, Some(repo), &theme(), 80)
+    let (input, model) = FilesMode::try_model(&vcs).unwrap();
+    FilesMode::new(model, input, Some(vcs), &theme(), 80)
 }
 
 fn finish(mode: &mut FilesMode) {
@@ -441,7 +441,7 @@ fn no_repo_and_diff_focus_cannot_mutate_the_repository() {
     let (dir, _) = fixture(&["a.txt"]);
     fs::write(dir.path().join("a.txt"), "edited\n").unwrap();
     let mut mode = live(dir.path());
-    let repo = mode.repo.take();
+    let vcs = mode.vcs.take();
     Mode::handle_key(&mut mode, KeyCode::Char('a'), 20);
     assert!(mode.action_job.is_none());
     assert!(mode.status.as_deref().unwrap().contains("working tree"));
@@ -450,7 +450,7 @@ fn no_repo_and_diff_focus_cannot_mutate_the_repository() {
     assert!(mode.captures_text_input());
     assert!(mode.action_job.is_none());
     Mode::handle_key(&mut mode, KeyCode::Esc, 20);
-    mode.repo = repo;
+    mode.vcs = vcs;
     crate::cli::browse::panel::Panel::focus_main(&mut mode, true);
     Mode::handle_key(&mut mode, KeyCode::Char('a'), 20);
     Mode::handle_key(&mut mode, KeyCode::Char('d'), 20);
@@ -553,7 +553,7 @@ fn missing_repository_and_failed_preparation_leave_discard_disabled() {
     let (dir, _) = fixture(&["a.txt"]);
     fs::write(dir.path().join("a.txt"), "edited\n").unwrap();
     let mut mode = live(dir.path());
-    mode.repo = None;
+    mode.vcs = None;
     Mode::handle_key(&mut mode, KeyCode::Char('d'), 20);
     assert!(mode.captures_text_input());
     assert!(mode.action_job.is_none());
@@ -1243,4 +1243,37 @@ fn hidden_low_value_files_stay_hidden_across_a_reload() {
         .map(|&index| display_path(&mode.model.files[index].file).to_string())
         .collect();
     assert_eq!(shown, ["CHANGELOG.md", "src/a.txt"]);
+}
+
+#[test]
+fn entering_a_gitbutler_workspace_shows_one_uncommitted_column_and_one_discard() {
+    let (dir, repo) = fixture(&["a.txt"]);
+    fs::write(dir.path().join("a.txt"), "staged\n").unwrap();
+    stage_all(&repo);
+    fs::write(dir.path().join("a.txt"), "edited\n").unwrap();
+    let mut mode = live(dir.path());
+    let before = settle(&mut mode).join("\n");
+    assert!(before.contains("Staged - Unstaged"), "{before}");
+
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("gitbutler/workspace", &head, true).unwrap();
+    drop(head);
+    repo.set_head("refs/heads/gitbutler/workspace").unwrap();
+    mode.reload(
+        Viewport {
+            height: 20,
+            diff_width: 80,
+        },
+        &theme(),
+    )
+    .unwrap();
+    let after = settle(&mut mode).join("\n");
+    assert!(after.contains("Uncommitted changes"), "{after}");
+    assert!(!after.contains("Staged"), "{after}");
+
+    Mode::handle_key(&mut mode, KeyCode::Char('d'), 20);
+    finish(&mut mode);
+    let menu = screen(&mut mode, DrawBudget::Full).join("\n");
+    assert!(menu.contains("Discard all changes"), "{menu}");
+    assert!(!menu.contains("Discard unstaged changes"), "{menu}");
 }

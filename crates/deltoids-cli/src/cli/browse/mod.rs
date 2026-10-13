@@ -66,6 +66,7 @@ mod terminal;
 mod test_screen;
 mod text;
 mod theme_picker;
+mod vcs;
 mod watch;
 mod workspace;
 

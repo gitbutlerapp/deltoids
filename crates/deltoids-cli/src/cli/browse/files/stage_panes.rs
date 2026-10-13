@@ -9,12 +9,14 @@
 use std::ops::Range;
 
 use super::model::{Column, Model};
+use crate::cli::browse::vcs::Columns;
 
 /// Per-column file orders for one model and sidebar order. Rebuilt when
 /// the model or its staging columns change; [`StagePanes::view`] is then
 /// constant time per frame.
 pub(super) struct StagePanes {
     has_stages: bool,
+    columns: Columns,
     staged: ColumnOrder,
     unstaged: ColumnOrder,
 }
@@ -56,6 +58,8 @@ pub(super) enum PaneTitle {
     One(Column),
     /// The selection has both columns; the pane shows `column`'s.
     Both(Column),
+    /// The working tree has no staging: every change is uncommitted.
+    Uncommitted,
 }
 
 /// The pane for one selection: the column it shows, its title, every file
@@ -81,6 +85,7 @@ impl StagePanes {
         });
         Self {
             has_stages: !model.stages.is_empty(),
+            columns: model.columns,
             staged,
             unstaged,
         }
@@ -112,6 +117,7 @@ impl StagePanes {
         };
         let title = match (self.has_stages, both) {
             (false, _) => PaneTitle::Diff,
+            (true, _) if self.columns == Columns::Single => PaneTitle::Uncommitted,
             (true, false) => PaneTitle::One(column),
             (true, true) => PaneTitle::Both(column),
         };
