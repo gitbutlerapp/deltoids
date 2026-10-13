@@ -30,7 +30,7 @@ use deltoids::render_tui::{
 use deltoids::{ChangeLayout, Theme, git};
 
 use super::diff_scrollbar;
-use super::files::FilesMode;
+use super::files::{CommitJob, FilesMode};
 use super::mode::{AppCommand, BackgroundWork, DrawBudget};
 use super::panel::{Panel, panel_title};
 use super::vcs::{Branch, Vcs};
@@ -136,6 +136,8 @@ pub(super) struct History {
     log_scroll: usize,
     commits: Option<CommitList>,
     commit: Option<CommitView>,
+    /// The commit view building on a worker thread, by commit id.
+    building: Option<(String, CommitJob)>,
     /// Seconds since the epoch at the last read; commit ages count from
     /// here.
     now: i64,
@@ -160,6 +162,7 @@ impl History {
             log_scroll: 0,
             commits: None,
             commit: None,
+            building: None,
             now: now(),
             diff_width: 0,
             side_rect: Rect::default(),
@@ -222,7 +225,8 @@ impl History {
         commit.view.as_ref().ok()
     }
 
-    /// Build the selected commit's view unless it is already built.
+    /// Start building the selected commit's view on a worker thread, or
+    /// adopt it once built. Never waits for the build.
     fn ensure_commit_view(&mut self, theme: &Theme) {
         let Some(selected) = self.selected_commit().cloned() else {
             self.commit = None;
@@ -231,11 +235,46 @@ impl History {
         if self.commit.as_ref().is_some_and(|c| c.id == selected.id) {
             return;
         }
-        self.commit = Some(CommitView {
-            view: FilesMode::commit(self.vcs.repo(), &selected, theme, self.diff_width),
-            id: selected.id,
-        });
-        self.sync_focus();
+        match self.building.as_mut() {
+            Some((id, job)) if *id == selected.id => {
+                if !job.ready() {
+                    return;
+                }
+                let (id, job) = self.building.take().expect("matched above");
+                self.commit = Some(CommitView {
+                    view: job.view(theme, self.diff_width),
+                    id,
+                });
+                self.sync_focus();
+            }
+            _ => {
+                let repo_dir = self.vcs.repo().git_dir().to_path_buf();
+                self.building = Some((selected.id.clone(), CommitJob::start(repo_dir, &selected)));
+            }
+        }
+    }
+
+    /// Report a finished build so the next frame adopts it, and drop one
+    /// whose commit is no longer selected.
+    fn poll_building(&mut self) -> BackgroundWork {
+        let selected = self.selected_commit().map(|c| c.id.clone());
+        let Some((id, job)) = self.building.as_mut() else {
+            return BackgroundWork::default();
+        };
+        if !job.ready() {
+            return BackgroundWork {
+                changed: false,
+                pending: true,
+            };
+        }
+        if selected.as_ref() == Some(id) {
+            return BackgroundWork {
+                changed: true,
+                pending: false,
+            };
+        }
+        self.building = None;
+        BackgroundWork::default()
     }
 
     /// Point the commit view's own focus where this panel's keys go: its
@@ -391,7 +430,7 @@ impl History {
         budget: DrawBudget,
     ) {
         // Building a commit's diff costs real time: in the list, wait for
-        // held keys to settle before building the newly selected one.
+        // held keys to settle before starting the newly selected one.
         if budget == DrawBudget::Full || self.screen == Screen::Commit {
             self.ensure_commit_view(theme);
         }
@@ -474,18 +513,25 @@ impl Panel for History {
             Screen::Commits => self.draw_commits(frame, area, number, focused, theme),
             Screen::Commit => {
                 self.ensure_commit_view(theme);
-                match self.commit.as_mut().map(|c| &mut c.view) {
-                    Some(Ok(view)) => view.draw_side(frame, area, number, focused, theme),
-                    Some(Err(err)) => {
-                        let color = pane_border_color(focused, theme);
-                        let title = panel_title(color, number, "Commit", theme);
-                        let block = pane_block_with_title_line(title, color, None);
-                        let muted = Style::default().fg(rgb_to_color(theme.muted));
-                        let message = Paragraph::new(err.clone()).style(muted).block(block);
-                        frame.render_widget(message, area);
+                let selected = self.selected_commit().map(|c| c.id.clone());
+                let view = self
+                    .commit
+                    .as_mut()
+                    .filter(|c| Some(&c.id) == selected.as_ref())
+                    .map(|c| &mut c.view);
+                let text = match view {
+                    Some(Ok(view)) => {
+                        view.draw_side(frame, area, number, focused, theme);
+                        return;
                     }
-                    None => {}
-                }
+                    Some(Err(err)) => err.clone(),
+                    None => "Loading…".to_string(),
+                };
+                let color = pane_border_color(focused, theme);
+                let title = panel_title(color, number, "Commit", theme);
+                let block = pane_block_with_title_line(title, color, None);
+                let muted = Style::default().fg(rgb_to_color(theme.muted));
+                frame.render_widget(Paragraph::new(text).style(muted).block(block), area);
             }
         }
     }
@@ -590,9 +636,14 @@ impl Panel for History {
     }
 
     fn background(&mut self, active: bool) -> BackgroundWork {
-        match self.current_commit_view() {
+        let building = self.poll_building();
+        let view = match self.current_commit_view() {
             Some(view) => Panel::background(view, active),
             None => BackgroundWork::default(),
+        };
+        BackgroundWork {
+            changed: building.changed || view.changed,
+            pending: building.pending || view.pending,
         }
     }
 
