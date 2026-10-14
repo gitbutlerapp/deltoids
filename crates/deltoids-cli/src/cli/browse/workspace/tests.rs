@@ -9,7 +9,9 @@ use deltoids::Theme;
 use super::Workspace;
 use crate::cli::browse::files::FilesMode;
 use crate::cli::browse::mode::{Mode, Viewport};
-use crate::cli::browse::test_screen::{PANE_HEIGHT, left_text, right_focused, right_text};
+use crate::cli::browse::test_screen::{LEFT, PANE_HEIGHT, left_text, right_focused, right_text};
+#[cfg(unix)]
+use crate::cli::browse::vcs::test_support::{fixture as but_fixture, stub_but};
 
 /// A repo on `main` with two commits, a `feature` branch forked from
 /// the first with one commit of its own, and a staged edit on `main`.
@@ -511,4 +513,172 @@ fn an_open_commit_follows_its_file_tree_without_the_header() {
     let diff = right_text(&mut workspace);
     assert!(!diff.contains("Author:"), "{diff}");
     assert!(diff.contains("fn feature()"), "{diff}");
+}
+
+/// Move `HEAD` onto a GitButler workspace branch at the current commit.
+#[cfg(unix)]
+fn enter_gitbutler(dir: &Path) {
+    let repo = Repository::open(dir).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("gitbutler/workspace", &head, true).unwrap();
+    repo.set_head("refs/heads/gitbutler/workspace").unwrap();
+}
+
+/// A workspace whose branches panel runs a `but` stand-in answering
+/// `status` with the JSON at `status`.
+#[cfg(unix)]
+fn gitbutler_workspace(dir: &Path, stubs: &Path, status: &Path) -> Workspace {
+    let but = stub_but(stubs, status).into_os_string();
+    Workspace::with_but(
+        FilesMode::discover_at(dir, &Theme::default(), 60),
+        Some(but),
+    )
+}
+
+/// The inner rows of panel `[n]`, borders and trailing blanks removed.
+fn panel_lines(workspace: &mut Workspace, n: char) -> Vec<String> {
+    let text = panel(workspace, n);
+    let rows: Vec<&str> = text.lines().collect();
+    rows[1..rows.len() - 1]
+        .iter()
+        .map(|row| {
+            let chars: Vec<char> = row.chars().collect();
+            chars[1..chars.len() - 1]
+                .iter()
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_gitbutler_workspace_panel_reads_like_but_status() {
+    let dir = fixture();
+    enter_gitbutler(dir.path());
+    let stubs = tempfile::tempdir().unwrap();
+    let mut workspace = gitbutler_workspace(
+        dir.path(),
+        stubs.path(),
+        &but_fixture("but-status-stacks.json"),
+    );
+    press(&mut workspace, &[KeyCode::Char('2')]);
+
+    let shown = panel_lines(&mut workspace, '2');
+
+    assert!(panel(&mut workspace, '2').contains("Workspace"));
+    assert!(!panel(&mut workspace, '2').contains("uncommitted"));
+    let reference = fs::read_to_string(but_fixture("but-status-stacks.txt")).unwrap();
+    let fit = |line: &str| {
+        let inner = LEFT as usize - 2;
+        line.chars()
+            .take(inner)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    };
+    let expected: Vec<String> = reference.lines().map(fit).take(shown.len()).collect();
+    assert_eq!(
+        shown[..expected.len()],
+        expected[..],
+        "{}",
+        shown.join("\n")
+    );
+
+    press(&mut workspace, &[KeyCode::Char('G')]);
+    let bottom = panel_lines(&mut workspace, '2');
+    let tail: Vec<String> = reference
+        .lines()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .chain(["", "unapplied", "   [parked]"])
+        .map(fit)
+        .collect();
+    assert_eq!(
+        bottom[bottom.len() - tail.len()..],
+        tail[..],
+        "{}",
+        bottom.join("\n")
+    );
+    let border = panel(&mut workspace, '2')
+        .lines()
+        .last()
+        .unwrap()
+        .to_string();
+    assert!(border.contains(" base 3917b63 init "), "{border}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_cursor_skips_rows_that_are_not_branches_or_commits() {
+    let dir = fixture();
+    enter_gitbutler(dir.path());
+    let stubs = tempfile::tempdir().unwrap();
+    let mut workspace = gitbutler_workspace(
+        dir.path(),
+        stubs.path(),
+        &but_fixture("but-status-stacks.json"),
+    );
+    press(&mut workspace, &[KeyCode::Char('2')]);
+
+    // From [empty], past its stack's end, to the next stack's branch.
+    press(
+        &mut workspace,
+        &[KeyCode::Char('k'), KeyCode::Char('j'), KeyCode::Enter],
+    );
+
+    assert!(panel(&mut workspace, '2').contains("Commits (top-feature)"));
+}
+
+/// The fixture repo in a GitButler workspace with `feature` applied:
+/// `but status` lists its one commit, by its real id.
+#[cfg(unix)]
+fn feature_status(dir: &Path) -> std::path::PathBuf {
+    let repo = Repository::open(dir).unwrap();
+    let feature = repo.revparse_single("feature").unwrap().id();
+    let base = repo.revparse_single("feature~1").unwrap().id();
+    let json = format!(
+        r#"{{
+  "uncommittedChanges": [],
+  "stacks": [{{"cliId": "g0", "assignedChanges": [], "branches": [{{
+    "cliId": "fe", "name": "feature", "branchStatus": "completelyUnpushed",
+    "commits": [{{"cliId": "abcd", "commitId": "{feature}",
+      "createdAt": "1970-01-01T00:03:20+00:00", "message": "add feature",
+      "authorName": "Ada Lovelace", "authorEmail": "ada@example.com"}}]
+  }}]}}],
+  "mergeBase": {{"cliId": "", "commitId": "{base}",
+    "createdAt": "1970-01-01T00:01:40+00:00", "message": "add greeting",
+    "authorName": "Ada Lovelace", "authorEmail": "ada@example.com"}},
+  "upstreamState": {{"behind": 0, "latestCommit": null, "lastFetched": null}}
+}}"#
+    );
+    let path = dir.join(".git").join("but-status.json");
+    fs::write(&path, json).unwrap();
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn a_commit_row_previews_its_diff_and_enter_opens_it() {
+    let dir = fixture();
+    enter_gitbutler(dir.path());
+    let stubs = tempfile::tempdir().unwrap();
+    let status = feature_status(dir.path());
+    let mut workspace = gitbutler_workspace(dir.path(), stubs.path(), &status);
+    press(&mut workspace, &[KeyCode::Char('2')]);
+
+    press(&mut workspace, &[KeyCode::Char('j')]);
+    assert!(right_text(&mut workspace).contains("fn feature()"));
+
+    press(&mut workspace, &[KeyCode::Enter]);
+    assert!(panel(&mut workspace, '2').contains("feature.rs"));
+    assert!(!panel(&mut workspace, '2').contains("[feature]"));
+
+    press(&mut workspace, &[KeyCode::Esc]);
+    assert!(panel(&mut workspace, '2').contains("abcd add feature"));
+    assert!(right_text(&mut workspace).contains("fn feature()"));
 }

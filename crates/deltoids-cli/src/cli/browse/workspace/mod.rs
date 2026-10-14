@@ -4,9 +4,10 @@
 //! main view `[0]`, showing whatever the current side panel drives:
 //!
 //! 1. Files: the working-tree file tree; main shows its diff.
-//! 2. Branches (local, or GitButler's): main shows the selected branch's log. Drills down
-//!    into a branch's commits (main: the selected commit's diff) and a
-//!    commit's files.
+//! 2. Branches: the local branches, or a GitButler workspace drawn like
+//!    `but status`. Main shows the selected branch's log or commit's
+//!    diff. Drills down into a branch's commits (main: the selected
+//!    commit's diff) and a commit's files.
 //!
 //! Focus is on one side panel or on the main view. The current side
 //! panel takes the larger share of the column. `1`/`2` focus a side
@@ -19,6 +20,7 @@
 //! The working tree is the one watched source. A reload rebuilds its
 //! diff and re-reads the branches.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
@@ -78,10 +80,17 @@ pub(super) struct Workspace {
     main_focused: bool,
     side_rects: [Rect; 2],
     main_rect: Rect,
+    /// The `but` program the branches panel runs, when not the one on
+    /// `PATH`.
+    but: Option<OsString>,
 }
 
 impl Workspace {
     pub(super) fn new(files: FilesMode) -> Self {
+        Self::with_but(files, None)
+    }
+
+    fn with_but(files: FilesMode, but: Option<OsString>) -> Self {
         let mut workspace = Self {
             files,
             branches: None,
@@ -89,6 +98,7 @@ impl Workspace {
             main_focused: false,
             side_rects: [Rect::default(); 2],
             main_rect: Rect::default(),
+            but,
         };
         workspace.open_repository();
         workspace
@@ -97,10 +107,15 @@ impl Workspace {
     /// Open the branches panel on the working tree's repository; without
     /// one it says so.
     fn open_repository(&mut self) {
+        let but = self.but.clone();
         self.branches = self
             .files
             .repo_dir()
             .and_then(|dir| Vcs::discover_at(&dir))
+            .map(|vcs| match but {
+                Some(program) => vcs.with_but(program),
+                None => vcs,
+            })
             .map(History::branches);
     }
 

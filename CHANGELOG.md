@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - TUI: a commit's preview reads like `git show`: its id, author, date, and message above the diff of every file it changes.
+- TUI: in a GitButler workspace, the Branches panel becomes a Workspace panel that shows the workspace's branches like `but status`: each stack's branches with their commits, and the base commit in the bottom border. Unapplied branches are listed below. Select a commit to preview its diff, and press `Enter` to open it.
 
 ## [0.14.0] - 2026-10-13
 

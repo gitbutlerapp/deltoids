@@ -1,7 +1,7 @@
 //! The GitButler adapter. Reads the workspace through git2 like the git
 //! adapter, and asks the `but` CLI (its `--json` output) for everything
-//! GitButler owns: which branches exist and how they stack, and the IDs
-//! its writes take.
+//! GitButler owns: the workspace `but status` shows, which branches
+//! exist outside it, and the IDs its writes take.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use deltoids::git::{self, FileStageStatus, StageChange, WorkingTreeSnapshot};
 use serde::Deserialize;
 
-use super::Branch;
+use super::{Base, Branch, OverviewContent, Stack, StatusCommit};
 
 /// The `but` executable `Vcs` runs, looked up on `PATH`.
 pub(super) const BUT: &str = "but";
@@ -61,18 +61,9 @@ fn net_change(staged: Option<StageChange>, unstaged: Option<StageChange>) -> Sta
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct BranchList {
     #[serde(default)]
-    applied_stacks: Vec<Stack>,
-    #[serde(default)]
     branches: Vec<ListedBranch>,
-}
-
-#[derive(Deserialize)]
-struct Stack {
-    #[serde(default)]
-    heads: Vec<ListedBranch>,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +83,12 @@ struct ListedBranch {
 struct Status {
     #[serde(default)]
     uncommitted_changes: Vec<UncommittedChange>,
+    #[serde(default)]
+    stacks: Vec<StatusStack>,
+    #[serde(default)]
+    merge_base: Option<StatusCommitJson>,
+    #[serde(default)]
+    upstream_state: Option<UpstreamState>,
 }
 
 #[derive(Deserialize)]
@@ -101,45 +98,189 @@ struct UncommittedChange {
     file_path: String,
 }
 
-/// GitButler's branches: every applied branch in stack order, marked
-/// current, then the unapplied local ones in the order `but` lists them.
-/// Branches that exist only on a remote are left out.
-pub(super) fn branches(program: &OsStr, repo: &git::Repo) -> Result<Vec<Branch>, String> {
+#[derive(Deserialize)]
+struct StatusStack {
+    #[serde(default)]
+    branches: Vec<StatusBranch>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusBranch {
+    cli_id: String,
+    name: String,
+    #[serde(default)]
+    commits: Vec<StatusCommitJson>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusCommitJson {
+    #[serde(default)]
+    cli_id: String,
+    commit_id: String,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    author_name: String,
+    #[serde(default)]
+    author_email: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpstreamState {
+    #[serde(default)]
+    behind: usize,
+}
+
+/// The workspace's branches as `but status` shows them: the applied
+/// stacks with each branch's own commits, and the common base. `others`
+/// is left empty.
+pub(super) fn status(program: &OsStr, repo: &git::Repo) -> Result<OverviewContent, String> {
+    let workdir = repo.workdir().ok_or("GitButler needs a working tree")?;
+    let status: Status = parse(&run(program, workdir, &["status"])?)?;
+    let stacks = status
+        .stacks
+        .into_iter()
+        .map(|stack| Stack {
+            branches: stack
+                .branches
+                .into_iter()
+                .map(|branch| stacked(repo, branch))
+                .collect(),
+        })
+        .collect();
+    let behind = status.upstream_state.map_or(0, |state| state.behind);
+    let base = status.merge_base.map(|commit| Base {
+        short_id: short_id(&commit.commit_id),
+        date: commit.created_at.get(..10).unwrap_or_default().to_string(),
+        summary: first_line(&commit.message),
+        behind,
+    });
+    Ok(OverviewContent {
+        stacks: Some(stacks),
+        base,
+        others: Vec::new(),
+    })
+}
+
+/// GitButler's local branches outside the workspace, in the order `but`
+/// lists them. Branches that exist only on a remote are left out.
+pub(super) fn unapplied(program: &OsStr, repo: &git::Repo) -> Result<Vec<Branch>, String> {
     let workdir = repo.workdir().ok_or("GitButler needs a working tree")?;
     let list: BranchList = parse(&run(program, workdir, &["branch", "list"])?)?;
-    let applied = list
-        .applied_stacks
-        .into_iter()
-        .flat_map(|stack| stack.heads)
-        .map(|branch| (branch, true));
-    let unapplied = list
+    Ok(list
         .branches
         .into_iter()
         .filter(|branch| branch.has_local)
-        .map(|branch| (branch, false));
-    Ok(applied
-        .chain(unapplied)
-        .map(|(branch, current)| row(repo, branch, current))
+        .map(|branch| {
+            let time = branch.last_commit_at.map(|ms| ms / 1000);
+            row(repo, branch.name, time, false)
+        })
         .collect())
 }
 
-fn row(repo: &git::Repo, branch: ListedBranch, current: bool) -> Branch {
-    let rev = format!("refs/heads/{}", branch.name);
+/// An applied branch with the commits `but status` lists for it.
+fn stacked(repo: &git::Repo, branch: StatusBranch) -> Branch {
+    let commits: Vec<StatusCommit> = branch.commits.into_iter().map(commit).collect();
+    let mut row = match commits.first() {
+        Some(tip) => Branch {
+            id: None,
+            rev: format!("refs/heads/{}", branch.name),
+            name: branch.name,
+            current: true,
+            summary: tip.commit.summary.clone(),
+            time: tip.commit.time,
+            commits: Vec::new(),
+        },
+        None => row(repo, branch.name, None, true),
+    };
+    row.id = Some(branch.cli_id);
+    row.commits = commits;
+    row
+}
+
+fn commit(json: StatusCommitJson) -> StatusCommit {
+    StatusCommit {
+        id: json.cli_id,
+        commit: git::Commit {
+            short_id: short_id(&json.commit_id),
+            id: json.commit_id,
+            summary: first_line(&json.message),
+            time: parse_time(&json.created_at).unwrap_or(0),
+            message: json.message,
+            author: json.author_name,
+            email: json.author_email,
+        },
+    }
+}
+
+fn row(repo: &git::Repo, name: String, time: Option<i64>, current: bool) -> Branch {
+    let rev = format!("refs/heads/{name}");
     let tip = repo
         .commits(&rev, 1)
         .ok()
         .and_then(|commits| commits.into_iter().next());
     Branch {
+        id: None,
         summary: tip.as_ref().map(|c| c.summary.clone()).unwrap_or_default(),
-        time: branch
-            .last_commit_at
-            .map(|ms| ms / 1000)
-            .or(tip.map(|c| c.time))
-            .unwrap_or(0),
-        name: branch.name,
+        time: time.or(tip.map(|c| c.time)).unwrap_or(0),
+        name,
         current,
+        commits: Vec::new(),
         rev,
     }
+}
+
+fn short_id(id: &str) -> String {
+    id.chars().take(7).collect()
+}
+
+fn first_line(message: &str) -> String {
+    message
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_string()
+}
+
+/// Seconds since the epoch of a timestamp `but` writes:
+/// `2026-10-13T14:28:17+00:00`, with optional fractional seconds, a `Z`
+/// zone, or the `2026-10-13 14:28:17 +0200` form.
+fn parse_time(text: &str) -> Option<i64> {
+    let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    let zone = text
+        .get(19..)?
+        .trim_start_matches(|c: char| c == '.' || c.is_ascii_digit())
+        .trim();
+    let offset = match zone {
+        "" | "Z" => 0,
+        _ => {
+            let sign = if zone.starts_with('-') { -1 } else { 1 };
+            let digits: String = zone.chars().filter(char::is_ascii_digit).collect();
+            let hours = digits.get(..2)?.parse::<i64>().ok()?;
+            let minutes = digits.get(2..4).unwrap_or("0").parse::<i64>().ok()?;
+            sign * (hours * 3600 + minutes * 60)
+        }
+    };
+    let days = days_from_civil(year, month, day);
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second - offset)
+}
+
+/// Days from 1970-01-01 to a proleptic Gregorian date.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 /// Discard every change in `changes` (each one's paths, rename sources

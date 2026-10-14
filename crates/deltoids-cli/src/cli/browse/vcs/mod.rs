@@ -10,13 +10,16 @@
 //!
 //! - Git: staged and unstaged columns, local branches, and writes through
 //!   the index and the git CLI ([`git_writes`]).
-//! - GitButler: one column of uncommitted changes, GitButler's branches,
+//! - GitButler: one column of uncommitted changes, the workspace's
+//!   branches as `but status` shows them (stacks of branches with their
+//!   commits, the common base) plus the unapplied local branches,
 //!   and writes through the `but` CLI ([`gitbutler`]). GitButler has no
 //!   staging, so staging changes nothing there.
 //!
 //! Objects (blobs, commits, patches) read the same way in both, through
 //! [`Vcs::repo`].
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +27,8 @@ use deltoids::git;
 
 mod git_writes;
 mod gitbutler;
+#[cfg(test)]
+pub(in crate::cli::browse) mod test_support;
 
 /// Which kind of repository a call found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,15 +63,57 @@ pub(in crate::cli::browse) struct WorkingTree {
     pub(in crate::cli::browse) columns: Columns,
 }
 
-/// The branches panel: its title and its rows in display order.
-pub(in crate::cli::browse) struct BranchList {
+/// What the branches panel shows: its title and the repository's
+/// branches, shaped like `but status` in a GitButler workspace.
+pub(in crate::cli::browse) struct Overview {
+    /// "Local branches" or "Workspace".
     pub(in crate::cli::browse) label: &'static str,
-    pub(in crate::cli::browse) branches: Result<Vec<Branch>, String>,
+    pub(in crate::cli::browse) content: Result<OverviewContent, String>,
 }
 
-/// One row of the branches panel.
+/// The branches and, in a GitButler workspace, the stacks and base
+/// `but status` lists.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(in crate::cli::browse) struct OverviewContent {
+    /// Applied stacks in `but status` order; `None` in plain git.
+    pub(in crate::cli::browse) stacks: Option<Vec<Stack>>,
+    /// The common base of the applied stacks; `None` in plain git.
+    pub(in crate::cli::browse) base: Option<Base>,
+    /// Every local branch in git; the unapplied local branches in
+    /// GitButler.
+    pub(in crate::cli::browse) others: Vec<Branch>,
+}
+
+/// Branches stacked on each other, top of the stack first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::cli::browse) struct Stack {
+    pub(in crate::cli::browse) branches: Vec<Branch>,
+}
+
+/// One commit of a stacked branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::cli::browse) struct StatusCommit {
+    /// GitButler's CLI ID.
+    pub(in crate::cli::browse) id: String,
+    pub(in crate::cli::browse) commit: git::Commit,
+}
+
+/// The commit every applied stack rests on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::cli::browse) struct Base {
+    pub(in crate::cli::browse) short_id: String,
+    /// `YYYY-MM-DD`.
+    pub(in crate::cli::browse) date: String,
+    pub(in crate::cli::browse) summary: String,
+    /// Commits the upstream branch has past the base.
+    pub(in crate::cli::browse) behind: usize,
+}
+
+/// One branch of the branches panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::cli::browse) struct Branch {
+    /// GitButler's CLI ID; `None` outside the applied stacks.
+    pub(in crate::cli::browse) id: Option<String>,
     pub(in crate::cli::browse) name: String,
     /// Checked out (git) or applied (GitButler).
     pub(in crate::cli::browse) current: bool,
@@ -74,6 +121,9 @@ pub(in crate::cli::browse) struct Branch {
     pub(in crate::cli::browse) summary: String,
     /// Time of the tip commit, in seconds since the epoch.
     pub(in crate::cli::browse) time: i64,
+    /// The branch's own commits, newest first, when `but status` lists
+    /// them; empty otherwise.
+    pub(in crate::cli::browse) commits: Vec<StatusCommit>,
     /// The ref [`Vcs::commits`] walks.
     rev: String,
 }
@@ -82,8 +132,8 @@ pub(in crate::cli::browse) struct Branch {
 pub(in crate::cli::browse) struct Vcs {
     repo: git::Repo,
     but: OsString,
-    /// GitButler's branch list and the refs fingerprint it was read at.
-    branch_cache: Option<(u64, Result<Vec<Branch>, String>)>,
+    /// GitButler's workspace and the refs fingerprint it was read at.
+    workspace_cache: Option<(u64, Result<OverviewContent, String>)>,
 }
 
 impl Vcs {
@@ -92,11 +142,17 @@ impl Vcs {
         git::Repo::discover_at(path).map(Self::new)
     }
 
+    /// Run `program` in place of the `but` found on `PATH`.
+    pub(in crate::cli::browse) fn with_but(mut self, program: OsString) -> Self {
+        self.but = program;
+        self
+    }
+
     fn new(repo: git::Repo) -> Self {
         Self {
             repo,
             but: OsString::from(gitbutler::BUT),
-            branch_cache: None,
+            workspace_cache: None,
         }
     }
 
@@ -124,42 +180,64 @@ impl Vcs {
         })
     }
 
-    /// The branches panel. GitButler's list costs a `but` run, so it is
-    /// read again only after a ref moves.
-    pub(in crate::cli::browse) fn branches(&mut self) -> BranchList {
+    /// What the branches panel shows. GitButler's costs two `but` runs,
+    /// so it is read again only after a ref moves.
+    pub(in crate::cli::browse) fn overview(&mut self) -> Overview {
         match self.backend() {
-            Backend::Git => BranchList {
+            Backend::Git => Overview {
                 label: "Local branches",
-                branches: self.repo.local_branches().map(|branches| {
-                    branches
+                content: self.repo.local_branches().map(|branches| OverviewContent {
+                    others: branches
                         .into_iter()
                         .map(|branch| Branch {
+                            id: None,
                             rev: format!("refs/heads/{}", branch.name),
                             name: branch.name,
                             current: branch.head,
                             summary: branch.summary,
                             time: branch.time,
+                            commits: Vec::new(),
                         })
-                        .collect()
+                        .collect(),
+                    ..OverviewContent::default()
                 }),
             },
             Backend::GitButler => {
                 let fingerprint = self.repo.refs_fingerprint();
                 let fresh = self
-                    .branch_cache
+                    .workspace_cache
                     .as_ref()
                     .is_some_and(|(at, _)| *at == fingerprint);
                 if !fresh {
-                    let branches = gitbutler::branches(&self.but, &self.repo);
-                    self.branch_cache = Some((fingerprint, branches));
+                    let content = self.read_workspace();
+                    self.workspace_cache = Some((fingerprint, content));
                 }
-                let (_, branches) = self.branch_cache.as_ref().expect("filled above");
-                BranchList {
-                    label: "Branches",
-                    branches: branches.clone(),
+                let (_, content) = self.workspace_cache.as_ref().expect("filled above");
+                Overview {
+                    label: "Workspace",
+                    content: content.clone(),
                 }
             }
         }
+    }
+
+    /// `but status` for the stacks and base, `but branch list` for the
+    /// local branches outside them.
+    fn read_workspace(&self) -> Result<OverviewContent, String> {
+        let mut content = gitbutler::status(&self.but, &self.repo)?;
+        let applied: HashSet<&str> = content
+            .stacks
+            .iter()
+            .flatten()
+            .flat_map(|stack| &stack.branches)
+            .map(|branch| branch.name.as_str())
+            .collect();
+        let others = gitbutler::unapplied(&self.but, &self.repo)?
+            .into_iter()
+            .filter(|branch| !applied.contains(branch.name.as_str()))
+            .collect();
+        content.others = others;
+        Ok(content)
     }
 
     /// Up to `limit` commits of `branch`, newest first.

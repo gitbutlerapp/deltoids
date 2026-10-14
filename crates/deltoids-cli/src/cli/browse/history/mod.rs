@@ -1,9 +1,14 @@
 //! The branches panel, in the spirit of lazygit's.
 //!
-//! [`History`] lists the branches [`Vcs::branches`] gives (local
-//! branches, or a GitButler workspace's branches), the current ones first; the
-//! main view shows the selected branch's log. `Enter` lists the branch's
-//! commits in the same panel, newest first and loaded a page at a time,
+//! [`History`] shows what [`Vcs::overview`] gives: the local branches,
+//! the current one first, or a GitButler workspace's branches drawn like
+//! `but status` (stacks of branches with their commits; the common base
+//! sits in the bottom border) with the unapplied branches below
+//! ([`tree`]). Uncommitted files
+//! stay in the Files panel. The cursor stops on branches and commits. On
+//! a branch the main view shows its log; on a commit, its diff, and
+//! `Enter` opens the commit as below. `Enter` on a branch lists the
+//! branch's commits in the same panel, newest first and loaded a page at a time,
 //! and the main view previews the selected commit's diff. `Enter` again
 //! opens the commit in the panel as a read-only [`FilesMode`]: its file
 //! tree in the panel and its diff in the main view, with every diff-pane
@@ -36,8 +41,10 @@ use super::panel::{Panel, panel_title};
 use super::vcs::{Branch, Vcs};
 
 mod cursor;
+mod tree;
 
 use cursor::Cursor;
+use tree::Tree;
 
 /// How many commits one page of a commit list loads.
 const PAGE: usize = 200;
@@ -115,21 +122,25 @@ struct CommitView {
     view: Result<FilesMode, String>,
 }
 
-/// A list pane's frame: its title, footer, and whether it has focus.
+/// A list pane's frame: its title, footer, whether it has focus, and
+/// whether the cursor's row is highlighted.
 struct Chrome {
     title: Line<'static>,
     footer: Option<Line<'static>>,
     focused: bool,
+    highlight: bool,
 }
 
 pub(super) struct History {
     vcs: Vcs,
     screen: Screen,
     main_focused: bool,
-    /// The branch list's title.
+    /// The branches screen's title.
     label: &'static str,
-    branches: Result<Vec<Branch>, String>,
+    tree: Result<Tree, String>,
     branch_cursor: Cursor,
+    /// Where `Esc` returns from an open commit.
+    commit_from: Screen,
     /// Each branch's log for the branches screen's main view.
     logs: HashMap<String, Result<Vec<git::Commit>, String>>,
     /// First log line on screen.
@@ -150,14 +161,20 @@ pub(super) struct History {
 impl History {
     /// The branches panel.
     pub(super) fn branches(mut vcs: Vcs) -> Self {
-        let list = vcs.branches();
+        let overview = vcs.overview();
+        let tree = overview.content.map(Tree::new);
+        let mut branch_cursor = Cursor::default();
+        if let Ok(tree) = &tree {
+            branch_cursor.selected = tree.snap(0, true);
+        }
         Self {
-            label: list.label,
-            branches: list.branches,
+            label: overview.label,
+            tree,
             vcs,
             screen: Screen::Branches,
             main_focused: false,
-            branch_cursor: Cursor::default(),
+            branch_cursor,
+            commit_from: Screen::Commits,
             logs: HashMap::new(),
             log_scroll: 0,
             commits: None,
@@ -175,15 +192,15 @@ impl History {
     /// a commit never changes.
     pub(super) fn refresh(&mut self) {
         self.now = now();
-        let selected = self.selected_branch().map(|b| b.name.clone());
-        let list = self.vcs.branches();
-        self.label = list.label;
-        self.branches = list.branches;
-        if let Some(index) = selected.and_then(|name| {
-            let branches = self.branches.as_ref().ok()?;
-            branches.iter().position(|b| b.name == name)
-        }) {
-            self.branch_cursor.selected = index;
+        let row = self.branch_cursor.selected;
+        let key = self.tree.as_ref().ok().and_then(|tree| tree.key(row));
+        let overview = self.vcs.overview();
+        self.label = overview.label;
+        self.tree = overview.content.map(Tree::new);
+        if let Ok(tree) = &self.tree {
+            self.branch_cursor.selected = key
+                .and_then(|key| tree.find(&key))
+                .unwrap_or_else(|| tree.snap(row, true));
         }
         self.logs.clear();
         if let Some(list) = self.commits.as_mut() {
@@ -192,18 +209,37 @@ impl History {
     }
 
     fn branch_count(&self) -> usize {
-        self.branches.as_ref().map_or(0, Vec::len)
+        self.tree.as_ref().map_or(0, Tree::len)
     }
 
     fn selected_branch(&self) -> Option<&Branch> {
-        self.branches
-            .as_ref()
-            .ok()?
-            .get(self.branch_cursor.selected)
+        self.tree.as_ref().ok()?.branch(self.branch_cursor.selected)
     }
 
+    /// The commit selected on the branches screen.
+    fn tree_commit(&self) -> Option<&git::Commit> {
+        self.tree.as_ref().ok()?.commit(self.branch_cursor.selected)
+    }
+
+    /// The commit the main view shows or the open commit: from the
+    /// branches screen or from a branch's commit list.
     fn selected_commit(&self) -> Option<&git::Commit> {
-        self.commits.as_ref()?.selected()
+        let source = match self.screen {
+            Screen::Commit => self.commit_from,
+            screen => screen,
+        };
+        match source {
+            Screen::Branches => self.tree_commit(),
+            Screen::Commits | Screen::Commit => self.commits.as_ref()?.selected(),
+        }
+    }
+
+    /// Open the selected commit, remembering where `Esc` returns.
+    fn open_commit(&mut self) {
+        if self.selected_commit().is_some() {
+            self.commit_from = self.screen;
+            self.set_screen(Screen::Commit);
+        }
     }
 
     /// The commit view, while it shows the selected commit.
@@ -310,7 +346,7 @@ impl History {
 
     fn step_back(&mut self) {
         let up = match self.screen {
-            Screen::Commit => Screen::Commits,
+            Screen::Commit => self.commit_from,
             Screen::Commits | Screen::Branches => Screen::Branches,
         };
         self.set_screen(up);
@@ -320,7 +356,12 @@ impl History {
         match self.screen {
             Screen::Branches => {
                 let len = self.branch_count();
+                let before = self.branch_cursor.selected;
                 self.branch_cursor.handle_key(key, len, height);
+                if let Ok(tree) = &self.tree {
+                    let row = self.branch_cursor.selected;
+                    self.branch_cursor.selected = tree.snap(row, row >= before);
+                }
                 self.log_scroll = 0;
             }
             Screen::Commits => {
@@ -366,10 +407,24 @@ impl History {
 
     fn draw_branches(&mut self, frame: &mut Frame<'_>, area: Rect, chrome: Chrome, theme: &Theme) {
         let now = self.now;
-        let rows = match &self.branches {
-            Ok(branches) if branches.is_empty() => Err("No branches.".to_string()),
-            Ok(branches) => Ok(branches.iter().map(|b| branch_row(b, now, theme)).collect()),
-            Err(err) => Err(err.clone()),
+        let (rows, highlight) = match &self.tree {
+            Ok(tree) if tree.len() == 0 => (Err("No branches.".to_string()), false),
+            Ok(tree) => (
+                Ok(tree.lines(now, theme)),
+                tree.is_selectable(self.branch_cursor.selected),
+            ),
+            Err(err) => (Err(err.clone()), false),
+        };
+        let width = area.width.saturating_sub(2) as usize;
+        let footer = self
+            .tree
+            .as_ref()
+            .ok()
+            .and_then(|tree| tree.footer(theme, width));
+        let chrome = Chrome {
+            highlight,
+            footer,
+            ..chrome
         };
         draw_list(frame, area, chrome, rows, &mut self.branch_cursor, theme);
     }
@@ -401,6 +456,7 @@ impl History {
             ),
             footer,
             focused,
+            highlight: true,
         };
         draw_list(frame, area, chrome, rows, &mut list.cursor, theme);
     }
@@ -470,7 +526,15 @@ impl History {
         match self.screen {
             Screen::Branches => {
                 let len = self.branch_count();
+                let before = self.branch_cursor.selected;
                 self.branch_cursor.click(offset, len);
+                if !self
+                    .tree
+                    .as_ref()
+                    .is_ok_and(|tree| tree.is_selectable(self.branch_cursor.selected))
+                {
+                    self.branch_cursor.selected = before;
+                }
                 self.log_scroll = 0;
             }
             Screen::Commits => {
@@ -509,6 +573,7 @@ impl Panel for History {
                     title: panel_title(color, number, self.label, theme),
                     footer: None,
                     focused,
+                    highlight: true,
                 };
                 self.draw_branches(frame, area, chrome, theme);
             }
@@ -550,8 +615,10 @@ impl Panel for History {
         self.main_rect = area;
         self.diff_width = diff_scrollbar::body_area(area).width as usize;
         match self.screen {
-            Screen::Branches => self.draw_branch_log(frame, area, focused, theme),
-            Screen::Commits | Screen::Commit => {
+            Screen::Branches if self.tree_commit().is_none() => {
+                self.draw_branch_log(frame, area, focused, theme);
+            }
+            Screen::Branches | Screen::Commits | Screen::Commit => {
                 self.draw_commit_diff(frame, area, focused, layout, theme, budget);
             }
         }
@@ -572,26 +639,29 @@ impl Panel for History {
         }
         if self.main_focused {
             return match self.screen {
-                Screen::Branches => {
+                Screen::Branches if self.tree_commit().is_none() => {
                     self.scroll_log(key, height);
                     AppCommand::Continue
                 }
-                Screen::Commits | Screen::Commit => self.forward_key(key, height),
+                Screen::Branches | Screen::Commits | Screen::Commit => {
+                    self.forward_key(key, height)
+                }
             };
         }
         match (self.screen, key) {
             (_, KeyCode::Esc) => self.step_back(),
-            (Screen::Branches, KeyCode::Enter) => self.open_branch_commits(),
             // The next draw builds the commit's view if the preview has
             // not yet.
-            (Screen::Commits, KeyCode::Enter) => {
-                if self.selected_commit().is_some() {
-                    self.set_screen(Screen::Commit);
-                }
+            (Screen::Branches, KeyCode::Enter) if self.tree_commit().is_some() => {
+                self.open_commit();
             }
+            (Screen::Branches, KeyCode::Enter) => self.open_branch_commits(),
+            (Screen::Commits, KeyCode::Enter) => self.open_commit(),
             // Shift+J/K scroll the preview, as they scroll the diff from
             // the Files panel.
-            (Screen::Commits, KeyCode::Char('J' | 'K')) => return self.forward_key(key, height),
+            (Screen::Branches | Screen::Commits, KeyCode::Char('J' | 'K')) => {
+                return self.forward_key(key, height);
+            }
             // An open commit's file tree; Enter on a file moves focus to
             // its diff.
             (Screen::Commit, _) => {
@@ -612,7 +682,7 @@ impl Panel for History {
         let to_commit = match self.screen {
             Screen::Commit => true,
             Screen::Commits => in_main,
-            Screen::Branches => false,
+            Screen::Branches => in_main && self.tree_commit().is_some(),
         };
         if to_commit {
             return self
@@ -701,7 +771,7 @@ fn draw_list(
         .iter()
         .zip(visible.clone())
         .map(|(row, index)| {
-            if index != cursor.selected {
+            if index != cursor.selected || !chrome.highlight {
                 return row.clone();
             }
             let mut row = row.clone().patch_style(selected_bg);
