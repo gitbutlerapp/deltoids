@@ -256,3 +256,100 @@ fn commit_patch_of_an_unknown_id_is_an_error() {
             .is_err()
     );
 }
+
+#[test]
+fn tree_patch_shows_the_net_change_across_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = init_repo(dir.path());
+    commit_at(dir.path(), &raw, &[("keep.txt", "one\n")], "base", 100);
+    let first = commit_id(&raw);
+    commit_at(
+        dir.path(),
+        &raw,
+        &[("keep.txt", "one\nflip\n"), ("new.txt", "draft\n")],
+        "second",
+        200,
+    );
+    commit_at(
+        dir.path(),
+        &raw,
+        &[("keep.txt", "one\n"), ("new.txt", "final\n")],
+        "third",
+        300,
+    );
+    let tip = commit_id(&raw);
+
+    let repo = Repo::discover_at(dir.path()).unwrap();
+    let patch = repo.tree_patch(&first, &tip).unwrap();
+
+    assert!(!patch.contains("keep.txt"), "{patch}");
+    assert!(patch.contains("new file mode"), "{patch}");
+    assert!(patch.contains("+final\n"), "{patch}");
+    assert!(!patch.contains("draft"), "{patch}");
+}
+
+#[test]
+fn tree_patch_takes_any_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = init_repo(dir.path());
+    commit_at(dir.path(), &raw, &[("a.txt", "one\n")], "first", 100);
+    commit_at(dir.path(), &raw, &[("a.txt", "two\n")], "second", 200);
+    let tip = commit_id(&raw);
+
+    let repo = Repo::discover_at(dir.path()).unwrap();
+    let patch = repo.tree_patch(&format!("{tip}^"), &tip).unwrap();
+
+    assert!(patch.contains("-one\n+two\n"), "{patch}");
+    assert!(repo.tree_patch("nope", &tip).is_err());
+}
+
+fn commit_id(repo: &Repository) -> String {
+    repo.head().unwrap().target().unwrap().to_string()
+}
+
+#[test]
+fn commits_after_stop_at_the_base_even_past_a_merge() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = init_repo(dir.path());
+    commit_at(dir.path(), &raw, &[("a.txt", "a\n")], "old", 100);
+    commit_at(dir.path(), &raw, &[("a.txt", "b\n")], "base", 200);
+    let base = commit_id(&raw);
+    let main = raw.head().unwrap().shorthand().unwrap().to_string();
+    checkout_new_branch(&raw, "feature");
+    commit_at(dir.path(), &raw, &[("f.txt", "f\n")], "feature work", 300);
+    // A merge whose second parent is an ancestor of the base.
+    let old = raw
+        .revparse_single("HEAD~2")
+        .unwrap()
+        .peel_to_commit()
+        .unwrap();
+    let head = raw.head().unwrap().peel_to_commit().unwrap();
+    let sig = Signature::new("Ada Lovelace", "ada@example.com", &Time::new(400, 0)).unwrap();
+    raw.commit(
+        Some("HEAD"),
+        &sig,
+        &sig,
+        "merge old",
+        &head.tree().unwrap(),
+        &[&head, &old],
+    )
+    .unwrap();
+    raw.set_head(&format!("refs/heads/{main}")).unwrap();
+
+    let repo = Repo::discover_at(dir.path()).unwrap();
+    let summaries =
+        |commits: Vec<Commit>| -> Vec<String> { commits.into_iter().map(|c| c.summary).collect() };
+
+    assert_eq!(
+        summaries(repo.commits_after(&base, "feature", 10).unwrap()),
+        ["merge old", "feature work"]
+    );
+    assert!(repo.commits_after(&base, &base, 10).unwrap().is_empty());
+    assert_eq!(
+        repo.commits_after("0123456789012345678901234567890123456789", "feature", 10)
+            .unwrap()
+            .len(),
+        4,
+        "an unknown base hides nothing"
+    );
+}

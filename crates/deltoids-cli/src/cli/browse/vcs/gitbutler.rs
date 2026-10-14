@@ -155,7 +155,7 @@ pub(super) fn status(program: &OsStr, repo: &git::Repo) -> Result<OverviewConten
         .collect();
     let behind = status.upstream_state.map_or(0, |state| state.behind);
     let base = status.merge_base.map(|commit| Base {
-        short_id: short_id(&commit.commit_id),
+        id: commit.commit_id.clone(),
         date: commit.created_at.get(..10).unwrap_or_default().to_string(),
         summary: first_line(&commit.message),
         behind,
@@ -195,6 +195,7 @@ fn stacked(repo: &git::Repo, branch: StatusBranch) -> Branch {
             summary: tip.commit.summary.clone(),
             time: tip.commit.time,
             commits: Vec::new(),
+            base: None,
         },
         None => row(repo, branch.name, None, true),
     };
@@ -232,6 +233,7 @@ fn row(repo: &git::Repo, name: String, time: Option<i64>, current: bool) -> Bran
         current,
         commits: Vec::new(),
         rev,
+        base: None,
     }
 }
 

@@ -41,7 +41,6 @@ use crate::cli::browse::watch::{
     ChangeReceiver, ChangeWatcher, path_warrants_reload, spawn_workdir_watcher,
 };
 use std::path::PathBuf;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -72,6 +71,7 @@ mod review;
 #[cfg(test)]
 mod review_tests;
 mod sidebar_pane;
+mod snapshot;
 mod stage_panes;
 #[cfg(test)]
 mod test_support;
@@ -82,6 +82,7 @@ use model::build_model;
 use model::{Column, Model};
 use reload::{Patches, ReloadOutcome, reload_working_tree};
 use sidebar_pane::build_sidebar;
+pub(super) use snapshot::{Snapshot, SnapshotPanel};
 use stage_panes::{PaneSpec, PaneTitle, StagePanes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -123,66 +124,6 @@ enum InputState {
 /// window; only a genuinely persistent error keeps failing past it. Kept
 /// generous so a burst of transient races never trips it.
 const STARTUP_LOADING_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// A commit's diff building on a worker thread: its patch read, both
-/// sides of every file resolved, and every file diffed, off the UI
-/// thread. [`Self::ready`] polls it; [`Self::view`] turns the finished
-/// build into the commit's read-only [`FilesMode`].
-pub(super) struct CommitJob {
-    commit: git::Commit,
-    receiver: mpsc::Receiver<Result<model::Model, String>>,
-    built: Option<Result<model::Model, String>>,
-}
-
-impl CommitJob {
-    /// Start building `commit` from the repository at `repo_dir`.
-    pub(super) fn start(repo_dir: PathBuf, commit: &git::Commit) -> Self {
-        let (sender, receiver) = mpsc::channel();
-        let id = commit.id.clone();
-        std::thread::spawn(move || {
-            let built = git::Repo::discover_at(&repo_dir)
-                .ok_or_else(|| "Not a git repository".to_string())
-                .and_then(|repo| {
-                    let patch = repo.commit_patch(&id)?;
-                    model::build_commit_model(&patch, &repo)
-                });
-            let _ = sender.send(built);
-        });
-        Self {
-            commit: commit.clone(),
-            receiver,
-            built: None,
-        }
-    }
-
-    /// Whether the build finished. Never blocks.
-    pub(super) fn ready(&mut self) -> bool {
-        if self.built.is_none() {
-            self.built = match self.receiver.try_recv() {
-                Ok(built) => Some(built),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err("Building the commit's diff failed".to_string()))
-                }
-            };
-        }
-        self.built.is_some()
-    }
-
-    /// The commit's static, read-only view: its file tree and diff, with
-    /// comments and hunk reshaping but no staging, discarding, or
-    /// reload. Call once [`Self::ready`] says the build finished.
-    pub(super) fn view(self, theme: &Theme, width: usize) -> Result<FilesMode, String> {
-        let built = self
-            .built
-            .unwrap_or_else(|| Err("The commit's diff is still building".to_string()));
-        let mut mode = FilesMode::new(built?, Patches::default(), None, theme, width);
-        mode.label = format!("Commit {}", self.commit.short_id);
-        mode.read_only = true;
-        mode.commit = Some(self.commit);
-        Ok(mode)
-    }
-}
 
 /// Files-mode state plus the data it renders. Owns the model, the repo
 /// (for blob resolution and reload), and the reload bookkeeping; the

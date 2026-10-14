@@ -239,3 +239,107 @@ fn hunk_headers_show_the_role_and_an_attention_dot_at_the_right_edge() {
         Some(deltoids::render_tui::rgb_to_color(theme().status_deleted))
     );
 }
+
+/// A repository with two commits, the second editing `src/a.rs`, and
+/// the id of each.
+fn two_commits() -> (tempfile::TempDir, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    let sig = git2::Signature::now("Ada", "ada@example.com").unwrap();
+    let mut parent: Option<git2::Oid> = None;
+    let mut ids = Vec::new();
+    for text in ["fn a() {}\n", "fn a() { b() }\n"] {
+        let blob = repo.blob(text.as_bytes()).unwrap();
+        let mut src = repo.treebuilder(None).unwrap();
+        src.insert("a.rs", blob, 0o100_644).unwrap();
+        let src = src.write().unwrap();
+        let mut root = repo.treebuilder(None).unwrap();
+        root.insert("src", src, 0o040_000).unwrap();
+        let tree = repo.find_tree(root.write().unwrap()).unwrap();
+        let parents: Vec<git2::Commit> = parent
+            .map(|id| repo.find_commit(id).unwrap())
+            .into_iter()
+            .collect();
+        let parents: Vec<&git2::Commit> = parents.iter().collect();
+        let id = repo
+            .commit(Some("HEAD"), &sig, &sig, "edit", &tree, &parents)
+            .unwrap();
+        parent = Some(id);
+        ids.push(id.to_string());
+    }
+    let second = ids.pop().unwrap();
+    let first = ids.pop().unwrap();
+    (dir, first, second)
+}
+
+/// Review `snapshot` with a Jev stand-in that counts its requests, and
+/// wait for the view and its judgments.
+fn snapshot_view(
+    dir: &std::path::Path,
+    snapshot: Snapshot,
+) -> (
+    SnapshotPanel,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let sent = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = sent.clone();
+    let jev = fake_jev("src/a.rs");
+    let sender: review::Sender =
+        std::sync::Arc::new(move |request: &crate::judgments::JevRequest| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            jev(request)
+        });
+    let review = review::Review::with_sender(sender);
+    let mut panel = SnapshotPanel::new(dir.to_path_buf(), snapshot, Some(review));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while panel.view().is_none() {
+        panel.adopt(&Theme::default());
+        assert!(Instant::now() < deadline, "snapshot did not build");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    wait_for_review(panel.view().unwrap());
+    (panel, sent)
+}
+
+#[test]
+fn a_branch_review_asks_jev_about_its_hunks() {
+    let (dir, _, second) = two_commits();
+    let snapshot = Snapshot::Branch {
+        name: "feature".to_string(),
+        base: format!("{second}^"),
+        tip: second,
+    };
+
+    let (mut panel, sent) = snapshot_view(dir.path(), snapshot);
+    let view = panel.view().unwrap();
+
+    assert!(sent.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    assert_eq!(view.label, "Review feature");
+    assert!(view.read_only);
+    assert_eq!(sidebar_paths(view), ["src/a.rs"]);
+    let notes: Vec<String> = view
+        .sidebar
+        .row_notes()
+        .iter()
+        .flatten()
+        .map(line_text)
+        .collect();
+    assert_eq!(notes, ["core ●"]);
+}
+
+fn second_commit(dir: &std::path::Path, id: &str) -> Snapshot {
+    let repo = deltoids::git::Repo::discover_at(dir).unwrap();
+    Snapshot::Commit(repo.commits(id, 1).unwrap().remove(0))
+}
+
+#[test]
+fn a_commit_review_asks_jev_about_its_hunks() {
+    let (dir, _, second) = two_commits();
+
+    let (mut panel, sent) = snapshot_view(dir.path(), second_commit(dir.path(), &second));
+    let view = panel.view().unwrap();
+
+    assert!(sent.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    assert!(view.label.starts_with("Commit "));
+}

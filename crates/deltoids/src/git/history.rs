@@ -69,12 +69,42 @@ impl Repo {
     /// only the commits it returns and their parents, so the cost follows
     /// `limit`, whatever the size of the history.
     pub fn commits(&self, rev: &str, limit: usize) -> Result<Vec<Commit>, String> {
+        self.walk(rev, None, limit)
+    }
+
+    /// [`Self::commits`] stopping at `base`: the commits reachable from
+    /// `rev` but not from `base`, as `git log base..rev` lists them. A
+    /// `base` that does not resolve hides nothing.
+    pub fn commits_after(
+        &self,
+        base: &str,
+        rev: &str,
+        limit: usize,
+    ) -> Result<Vec<Commit>, String> {
+        let base = self
+            .0
+            .revparse_single(base)
+            .and_then(|object| object.peel_to_commit())
+            .ok()
+            .map(|commit| commit.id());
+        self.walk(rev, base, limit)
+    }
+
+    fn walk(&self, rev: &str, base: Option<Oid>, limit: usize) -> Result<Vec<Commit>, String> {
         let error = |e: git2::Error| format!("failed to read commits of {rev}: {e}");
+        let hidden = |id: Oid| {
+            base.is_some_and(|base| {
+                id == base || self.0.graph_descendant_of(base, id).unwrap_or(false)
+            })
+        };
         let start = self
             .0
             .revparse_single(rev)
             .and_then(|object| object.peel_to_commit())
             .map_err(error)?;
+        if hidden(start.id()) {
+            return Ok(Vec::new());
+        }
         let mut seen = HashSet::from([start.id()]);
         let mut queue = BinaryHeap::from([(start.time().seconds(), start.id())]);
         let mut commits = Vec::new();
@@ -83,7 +113,10 @@ impl Repo {
                 break;
             };
             let commit = self.0.find_commit(id).map_err(error)?;
-            for parent in commit.parent_ids().filter(|id| seen.insert(*id)) {
+            for parent in commit
+                .parent_ids()
+                .filter(|id| seen.insert(*id) && !hidden(*id))
+            {
                 let time = self.0.find_commit(parent).map_err(error)?.time();
                 queue.push((time.seconds(), parent));
             }
@@ -106,6 +139,17 @@ impl Repo {
             Err(_) => None,
         };
         print_patch(&self.0, parent.as_ref(), &tree).map_err(error)
+    }
+
+    /// The patch from revision `base`'s tree to revision `tip`'s: the
+    /// net change of every commit between them, in the form
+    /// [`Self::commit_patch`] gives.
+    pub fn tree_patch(&self, base: &str, tip: &str) -> Result<String, String> {
+        let error = |e: git2::Error| format!("failed to diff {base}..{tip}: {e}");
+        let tree = |rev: &str| self.0.revparse_single(rev).and_then(|o| o.peel_to_tree());
+        let old = tree(base).map_err(error)?;
+        let new = tree(tip).map_err(error)?;
+        print_patch(&self.0, Some(&old), &new).map_err(error)
     }
 }
 

@@ -595,7 +595,12 @@ fn a_gitbutler_workspace_panel_reads_like_but_status() {
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
-        .chain(["", "unapplied", "   [parked]"])
+        .chain([
+            "┴ 3917b63 (common base) 2026-10-14 init",
+            "",
+            "unapplied",
+            "   [parked]",
+        ])
         .map(fit)
         .collect();
     assert_eq!(
@@ -604,12 +609,6 @@ fn a_gitbutler_workspace_panel_reads_like_but_status() {
         "{}",
         bottom.join("\n")
     );
-    let border = panel(&mut workspace, '2')
-        .lines()
-        .last()
-        .unwrap()
-        .to_string();
-    assert!(border.contains(" base 3917b63 init "), "{border}");
 }
 
 #[cfg(unix)]
@@ -631,7 +630,7 @@ fn the_cursor_skips_rows_that_are_not_branches_or_commits() {
         &[KeyCode::Char('k'), KeyCode::Char('j'), KeyCode::Enter],
     );
 
-    assert!(panel(&mut workspace, '2').contains("Commits (top-feature)"));
+    assert!(panel(&mut workspace, '1').contains("Review top-feature"));
 }
 
 /// The fixture repo in a GitButler workspace with `feature` applied:
@@ -639,22 +638,37 @@ fn the_cursor_skips_rows_that_are_not_branches_or_commits() {
 #[cfg(unix)]
 fn feature_status(dir: &Path) -> std::path::PathBuf {
     let repo = Repository::open(dir).unwrap();
-    let feature = repo.revparse_single("feature").unwrap().id();
+    let feature = repo.revparse_single("feature").unwrap().id().to_string();
+    let branch = status_branch("fe", "feature", &[("abcd", &feature, "add feature")]);
+    write_status(dir, &[&[branch]])
+}
+
+/// Write `but status` JSON into the fixture repo's `.git`: `stacks` of
+/// [`status_branch`]es, top first, all resting on `feature`'s parent.
+#[cfg(unix)]
+fn write_status(dir: &Path, stacks: &[&[String]]) -> std::path::PathBuf {
+    let repo = Repository::open(dir).unwrap();
     let base = repo.revparse_single("feature~1").unwrap().id();
+    let stacks: Vec<String> = stacks
+        .iter()
+        .enumerate()
+        .map(|(index, branches)| {
+            format!(
+                r#"{{"cliId": "g{index}", "assignedChanges": [], "branches": [{}]}}"#,
+                branches.join(",")
+            )
+        })
+        .collect();
     let json = format!(
         r#"{{
   "uncommittedChanges": [],
-  "stacks": [{{"cliId": "g0", "assignedChanges": [], "branches": [{{
-    "cliId": "fe", "name": "feature", "branchStatus": "completelyUnpushed",
-    "commits": [{{"cliId": "abcd", "commitId": "{feature}",
-      "createdAt": "1970-01-01T00:03:20+00:00", "message": "add feature",
-      "authorName": "Ada Lovelace", "authorEmail": "ada@example.com"}}]
-  }}]}}],
+  "stacks": [{}],
   "mergeBase": {{"cliId": "", "commitId": "{base}",
     "createdAt": "1970-01-01T00:01:40+00:00", "message": "add greeting",
     "authorName": "Ada Lovelace", "authorEmail": "ada@example.com"}},
   "upstreamState": {{"behind": 0, "latestCommit": null, "lastFetched": null}}
-}}"#
+}}"#,
+        stacks.join(",")
     );
     let path = dir.join(".git").join("but-status.json");
     fs::write(&path, json).unwrap();
@@ -663,7 +677,7 @@ fn feature_status(dir: &Path) -> std::path::PathBuf {
 
 #[cfg(unix)]
 #[test]
-fn a_commit_row_previews_its_diff_and_enter_opens_it() {
+fn a_commit_row_previews_its_diff_and_enter_reviews_it_in_files() {
     let dir = fixture();
     enter_gitbutler(dir.path());
     let stubs = tempfile::tempdir().unwrap();
@@ -675,10 +689,244 @@ fn a_commit_row_previews_its_diff_and_enter_opens_it() {
     assert!(right_text(&mut workspace).contains("fn feature()"));
 
     press(&mut workspace, &[KeyCode::Enter]);
-    assert!(panel(&mut workspace, '2').contains("feature.rs"));
-    assert!(!panel(&mut workspace, '2').contains("[feature]"));
-
-    press(&mut workspace, &[KeyCode::Esc]);
+    let files = panel(&mut workspace, '1');
+    assert!(files.contains("Commit "), "{files}");
+    assert!(files.contains("feature.rs"), "{files}");
+    assert!(!files.contains("greet.rs"), "{files}");
+    assert_eq!(tallest(&mut workspace), '1');
     assert!(panel(&mut workspace, '2').contains("abcd add feature"));
     assert!(right_text(&mut workspace).contains("fn feature()"));
+
+    press(&mut workspace, &[KeyCode::Esc]);
+    let files = panel(&mut workspace, '1');
+    assert!(files.contains("[1]─Files"), "{files}");
+    assert!(files.contains("greet.rs"), "{files}");
+}
+
+/// Commit `files` on top of `branch` without touching the working tree,
+/// and move `branch` to the new commit.
+#[cfg(unix)]
+fn commit_on(repo: &Repository, branch: &str, files: &[(&str, &str)], msg: &str) -> String {
+    let parent = repo
+        .revparse_single(branch)
+        .unwrap()
+        .peel_to_commit()
+        .unwrap();
+    let mut builder = repo.treebuilder(Some(&parent.tree().unwrap())).unwrap();
+    for (path, text) in files {
+        let blob = repo.blob(text.as_bytes()).unwrap();
+        builder.insert(path, blob, 0o100_644).unwrap();
+    }
+    let tree = repo.find_tree(builder.write().unwrap()).unwrap();
+    let sig = Signature::new("Ada Lovelace", "ada@example.com", &Time::new(400, 0)).unwrap();
+    let id = repo
+        .commit(None, &sig, &sig, msg, &tree, &[&parent])
+        .unwrap();
+    repo.reference(&format!("refs/heads/{branch}"), id, true, "test")
+        .unwrap();
+    id.to_string()
+}
+
+/// One `but status` branch: its CLI ID, name, and commits newest first
+/// as (CLI ID, commit id, message).
+#[cfg(unix)]
+fn status_branch(cli_id: &str, name: &str, commits: &[(&str, &str, &str)]) -> String {
+    let commits: Vec<String> = commits
+        .iter()
+        .map(|(cli_id, id, message)| {
+            format!(
+                r#"{{"cliId": "{cli_id}", "commitId": "{id}",
+                  "createdAt": "1970-01-01T00:06:40+00:00", "message": "{message}",
+                  "authorName": "Ada Lovelace", "authorEmail": "ada@example.com"}}"#
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"cliId": "{cli_id}", "name": "{name}", "branchStatus": "completelyUnpushed",
+            "commits": [{}]}}"#,
+        commits.join(",")
+    )
+}
+
+/// The fixture repo in a GitButler workspace with two stacks: `upper`
+/// (two commits: add `upper.rs`, then rewrite it) on `feature` (adds
+/// `feature.rs`), and `empty` with no commits. `parked` is unapplied.
+#[cfg(unix)]
+fn stacked_status(dir: &Path) -> std::path::PathBuf {
+    let repo = Repository::open(dir).unwrap();
+    let feature = repo.revparse_single("feature").unwrap().id().to_string();
+    let tip = repo.find_commit(feature.parse().unwrap()).unwrap();
+    repo.branch("upper", &tip, false).unwrap();
+    let draft = commit_on(&repo, "upper", &[("upper.rs", "draft\n")], "draft upper");
+    let last = commit_on(
+        &repo,
+        "upper",
+        &[("upper.rs", "final\n"), ("upper.md", "# Upper\n")],
+        "finish upper",
+    );
+    let upper = status_branch(
+        "up",
+        "upper",
+        &[("u2", &last, "finish upper"), ("u1", &draft, "draft upper")],
+    );
+    let lower = status_branch("fe", "feature", &[("f1", &feature, "add feature")]);
+    let empty = status_branch("em", "empty", &[]);
+    write_status(dir, &[&[upper, lower], &[empty]])
+}
+
+/// A workspace on the stacked fixture with the Workspace panel focused
+/// on `upper`, its first row.
+#[cfg(unix)]
+fn stacked_workspace(dir: &Path, stubs: &Path) -> Workspace {
+    enter_gitbutler(dir);
+    let status = stacked_status(dir);
+    let mut workspace = gitbutler_workspace(dir, stubs, &status);
+    press(&mut workspace, &[KeyCode::Char('2')]);
+    workspace
+}
+
+#[cfg(unix)]
+#[test]
+fn enter_on_a_stacked_branch_reviews_its_own_commits_in_files() {
+    let dir = fixture();
+    let stubs = tempfile::tempdir().unwrap();
+    let mut workspace = stacked_workspace(dir.path(), stubs.path());
+
+    press(&mut workspace, &[KeyCode::Enter]);
+
+    let files = panel(&mut workspace, '1');
+    assert!(files.contains("Review upper"), "{files}");
+    assert!(files.contains("upper.rs"), "{files}");
+    assert!(!files.contains("feature.rs"), "{files}");
+    assert!(!files.contains("greet.rs"), "{files}");
+    assert_eq!(tallest(&mut workspace), '1');
+    assert!(files.contains("upper.md"), "{files}");
+    press(&mut workspace, &[KeyCode::Char('j')]);
+    let right = right_text(&mut workspace);
+    assert!(right.contains("final"), "{right}");
+    assert!(!right.contains("draft"), "{right}");
+    assert!(panel(&mut workspace, '2').contains("[upper]"));
+}
+
+#[cfg(unix)]
+#[test]
+fn enter_on_a_lower_branch_reviews_only_its_commits() {
+    let dir = fixture();
+    let stubs = tempfile::tempdir().unwrap();
+    let mut workspace = stacked_workspace(dir.path(), stubs.path());
+
+    let to_feature = [KeyCode::Char('j'); 3];
+    press(&mut workspace, &to_feature);
+    press(&mut workspace, &[KeyCode::Enter]);
+
+    let files = panel(&mut workspace, '1');
+    assert!(files.contains("Review feature"), "{files}");
+    assert!(files.contains("feature.rs"), "{files}");
+    assert!(!files.contains("upper.rs"), "{files}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_review_keeps_its_comments_until_esc_brings_back_the_working_tree() {
+    let dir = fixture();
+    let stubs = tempfile::tempdir().unwrap();
+    let mut workspace = stacked_workspace(dir.path(), stubs.path());
+    press(&mut workspace, &[KeyCode::Enter]);
+    panel(&mut workspace, '1');
+
+    // Staging and discarding do nothing to a review.
+    press(&mut workspace, &[KeyCode::Char(' '), KeyCode::Char('d')]);
+    assert!(panel(&mut workspace, '1').contains("Review upper"));
+
+    press(&mut workspace, &[KeyCode::Enter]);
+    right_text(&mut workspace);
+    press(&mut workspace, &[KeyCode::Char('j'), KeyCode::Char('c')]);
+    for ch in "why final".chars() {
+        press(&mut workspace, &[KeyCode::Char(ch)]);
+    }
+    press(&mut workspace, &[KeyCode::Enter]);
+    let copied =
+        |workspace: &mut Workspace| match workspace.handle_key(KeyCode::Char('y'), PANE_HEIGHT) {
+            crate::cli::browse::mode::AppCommand::CopyToClipboard(text) => text,
+            other => panic!("expected a copy, got {other:?}"),
+        };
+    assert!(copied(&mut workspace).contains("why final"));
+
+    // Away and back to the same branch: the same review, comment kept.
+    press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Enter]);
+    press(&mut workspace, &[KeyCode::Char('0')]);
+    assert!(copied(&mut workspace).contains("why final"));
+
+    press(&mut workspace, &[KeyCode::Esc, KeyCode::Esc]);
+    let files = panel(&mut workspace, '1');
+    assert!(files.contains("[1]─Files"), "{files}");
+    assert!(files.contains("greet.rs"), "{files}");
+}
+
+#[cfg(unix)]
+#[test]
+fn enter_on_an_empty_branch_does_nothing() {
+    let dir = fixture();
+    let stubs = tempfile::tempdir().unwrap();
+    let mut workspace = stacked_workspace(dir.path(), stubs.path());
+
+    let to_empty = [KeyCode::Char('j'); 5];
+    press(&mut workspace, &to_empty);
+    assert!(left_text(&mut workspace).contains("[empty]"));
+    press(&mut workspace, &[KeyCode::Enter]);
+
+    assert!(panel(&mut workspace, '1').contains("[1]─Files"));
+    assert_eq!(tallest(&mut workspace), '2');
+}
+
+#[cfg(unix)]
+#[test]
+fn enter_on_an_unapplied_branch_lists_its_commits() {
+    let dir = fixture();
+    let stubs = tempfile::tempdir().unwrap();
+    let mut workspace = stacked_workspace(dir.path(), stubs.path());
+
+    press(&mut workspace, &[KeyCode::Char('G'), KeyCode::Enter]);
+
+    assert!(panel(&mut workspace, '2').contains("Commits (parked)"));
+    assert!(panel(&mut workspace, '1').contains("[1]─Files"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_gitbutler_branch_log_stops_at_the_base() {
+    let dir = fixture();
+    let stubs = tempfile::tempdir().unwrap();
+    let mut workspace = stacked_workspace(dir.path(), stubs.path());
+
+    // [feature]: its own commit, then the base it rests on.
+    press(&mut workspace, &[KeyCode::Char('j'); 3]);
+    let log = right_text(&mut workspace);
+
+    assert!(log.contains("add feature"), "{log}");
+    assert!(!log.contains("add greeting"), "{log}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_commit_preview_reads_like_git_show() {
+    let dir = fixture();
+    let stubs = tempfile::tempdir().unwrap();
+    let mut workspace = stacked_workspace(dir.path(), stubs.path());
+
+    press(&mut workspace, &[KeyCode::Char('j')]);
+    let preview = right_text(&mut workspace);
+
+    let at = |text: &str| {
+        preview.find(text).unwrap_or_else(|| {
+            panic!(
+                "no {text:?} in:
+{preview}"
+            )
+        })
+    };
+    assert!(at("commit ") < at("Author: Ada Lovelace <ada@example.com>"));
+    assert!(at("Date:   ") < at("    finish upper"));
+    assert!(at("    finish upper") < at("upper.md"));
+    assert!(at("upper.md") < at("upper.rs"));
 }

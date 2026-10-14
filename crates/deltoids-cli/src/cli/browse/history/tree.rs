@@ -1,13 +1,13 @@
 //! The branches screen's rows: a flat branch list in plain git, and the
 //! workspace drawn the way `but status` draws it in GitButler.
 //!
-//! Uncommitted files stay in the Files panel, and the common base goes
-//! in the bottom border ([`Tree::footer`]). Only branch and commit rows
-//! can be selected; graph connectors are there to read.
+//! Uncommitted files stay in the Files panel. The common base closes
+//! the applied stacks, as `but status` draws it. Only branch and commit
+//! rows can be selected; graph connectors and the base are there to
+//! read.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use deltoids::render_tui::rgb_to_color;
 use deltoids::{Theme, git};
@@ -33,6 +33,10 @@ enum Row {
         commit: usize,
         id_width: usize,
     },
+    /// `┊ upstream +2`: commits the upstream branch has past the base.
+    Upstream,
+    /// `┴ 3917b63 (common base) 2026-10-14 init`.
+    Base,
     /// The heading over branches outside the workspace.
     Unapplied,
 }
@@ -58,6 +62,12 @@ impl Tree {
         if workspace {
             for stack in content.stacks.into_iter().flatten() {
                 tree.push_stack(stack);
+            }
+            if tree.base.as_ref().is_some_and(|base| base.behind > 0) {
+                tree.rows.push(Row::Upstream);
+            }
+            if tree.base.is_some() {
+                tree.rows.push(Row::Base);
             }
             if !content.others.is_empty() {
                 tree.rows.push(Row::Connector(""));
@@ -175,58 +185,21 @@ impl Tree {
                     commit,
                     id_width,
                 } => commit_line(&self.branches[branch].commits[commit], id_width, &style),
+                Row::Upstream => {
+                    let behind = self.base.as_ref().map_or(0, |base| base.behind);
+                    Line::from(vec![
+                        Span::raw("┊ "),
+                        Span::styled(format!("upstream +{behind}"), style.muted),
+                    ])
+                }
+                Row::Base => self
+                    .base
+                    .as_ref()
+                    .map_or_else(Line::default, |base| base_line(base, &style)),
                 Row::Unapplied => Line::from(Span::styled("unapplied", style.muted)),
             })
             .collect()
     }
-
-    /// The bottom border's `base 3917b63 init · upstream +1`, the subject
-    /// cut short to fit in `width` columns. `None` in plain git.
-    pub(super) fn footer(&self, theme: &Theme, width: usize) -> Option<Line<'static>> {
-        let base = self.base.as_ref()?;
-        let style = Styles::new(theme);
-        let lag = (base.behind > 0).then(|| format!(" · upstream +{}", base.behind));
-        let fixed = Line::from(vec![
-            Span::raw(" base "),
-            Span::raw(base.short_id.clone()),
-            Span::raw(" "),
-            Span::raw(lag.clone().unwrap_or_default()),
-            Span::raw(" "),
-        ])
-        .width();
-        let mut spans = vec![
-            Span::raw(" base "),
-            Span::styled(base.short_id.clone(), style.muted),
-        ];
-        let room = width.saturating_sub(fixed);
-        if room >= 2 && !base.summary.is_empty() {
-            spans.push(Span::raw(" "));
-            spans.push(Span::raw(truncate(&base.summary, room)));
-        }
-        if let Some(lag) = lag {
-            spans.push(Span::styled(lag, style.muted));
-        }
-        spans.push(Span::raw(" "));
-        Some(Line::from(spans))
-    }
-}
-
-/// `text` cut to `width` columns, ending in `…` when cut.
-fn truncate(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    for c in text.chars() {
-        if out.width() + c.width().unwrap_or(0) + 1 > width {
-            break;
-        }
-        out.push(c);
-    }
-    if width > 0 {
-        out.push('…');
-    }
-    out
 }
 
 /// `but status`'s style roles, in the theme's colors.
@@ -263,6 +236,18 @@ fn stacked_branch_line(branch: &Branch, notch: char, style: &Styles) -> Line<'st
         spans.push(Span::styled("(no commits)", style.muted));
     }
     Line::from(spans)
+}
+
+/// `┴ 3917b63 (common base) 2026-10-14 init`.
+fn base_line(base: &Base, style: &Styles) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("┴ "),
+        Span::styled(base.id.chars().take(7).collect::<String>(), style.commit_id),
+        Span::raw(" "),
+        Span::styled("(common base)", style.muted),
+        Span::raw(format!(" {} ", base.date)),
+        Span::raw(base.summary.clone()),
+    ])
 }
 
 /// `┊●   swuu top`, the ID padded to the branch's widest.
@@ -311,7 +296,7 @@ mod tests {
                 branches: vec![top],
             }]),
             base: Some(Base {
-                short_id: "3917b63".into(),
+                id: "3917b63b1afceb59f7c748f6bfe40c5c8bceeb93".into(),
                 date: "2026-10-14".into(),
                 summary: "init".into(),
                 behind: 2,
@@ -325,24 +310,34 @@ mod tests {
     }
 
     #[test]
-    fn the_footer_names_the_base_and_upstream_lag() {
+    fn the_base_closes_the_stacks_under_the_upstream_lag() {
         let tree = Tree::new(content());
 
-        let footer = tree.footer(&Theme::default(), 40).unwrap();
-        assert_eq!(footer.to_string(), " base 3917b63 init · upstream +2 ");
+        let lines: Vec<String> = tree
+            .lines(NOW, &Theme::default())
+            .iter()
+            .map(Line::to_string)
+            .collect();
 
-        let narrow = tree.footer(&Theme::default(), 30).unwrap();
-        assert_eq!(narrow.to_string(), " base 3917b63 · upstream +2 ");
+        assert_eq!(
+            lines[lines.len() - 2..],
+            ["┊ upstream +2", "┴ 3917b63 (common base) 2026-10-14 init"]
+        );
+        assert!(!tree.is_selectable(lines.len() - 1));
     }
 
     #[test]
-    fn plain_git_has_no_footer() {
-        let tree = Tree::new(OverviewContent {
-            others: vec![branch("main")],
-            ..OverviewContent::default()
-        });
+    fn no_upstream_row_without_lag() {
+        let mut content = content();
+        content.base.as_mut().unwrap().behind = 0;
 
-        assert_eq!(tree.footer(&Theme::default(), 40), None);
+        let lines = Tree::new(content).lines(NOW, &Theme::default());
+
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.to_string().contains("upstream"))
+        );
     }
 
     #[test]

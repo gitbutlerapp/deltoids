@@ -3,11 +3,15 @@
 //! The left column stacks two numbered side panels; the right pane is the
 //! main view `[0]`, showing whatever the current side panel drives:
 //!
-//! 1. Files: the working-tree file tree; main shows its diff.
+//! 1. Files: the working-tree file tree; main shows its diff. While a
+//!    review of a commit or a branch is open, the review's files and
+//!    diff instead ([`SnapshotPanel`]); `Esc` on the panel closes it.
 //! 2. Branches: the local branches, or a GitButler workspace drawn like
 //!    `but status`. Main shows the selected branch's log or commit's
 //!    diff. Drills down into a branch's commits (main: the selected
-//!    commit's diff) and a commit's files.
+//!    commit's diff) and a commit's files. In a GitButler workspace,
+//!    `Enter` on an applied branch or one of its commits opens its
+//!    review in Files.
 //!
 //! Focus is on one side panel or on the main view. The current side
 //! panel takes the larger share of the column. `1`/`2` focus a side
@@ -32,7 +36,7 @@ use ratatui::widgets::Paragraph;
 use deltoids::render_tui::{pane_block_with_title_line, pane_border_color, rgb_to_color};
 use deltoids::{ChangeLayout, Theme};
 
-use super::files::FilesMode;
+use super::files::{FilesMode, SnapshotPanel};
 use super::history::History;
 use super::mode::{AppCommand, BackgroundWork, DrawBudget, Mode, Viewport};
 use super::panel::{Panel, panel_title};
@@ -74,6 +78,8 @@ impl Side {
 
 pub(super) struct Workspace {
     files: FilesMode,
+    /// A review shown in the Files panel in place of `files`.
+    review: Option<SnapshotPanel>,
     branches: Option<History>,
     /// The side panel that drives the main view.
     side: Side,
@@ -93,6 +99,7 @@ impl Workspace {
     fn with_but(files: FilesMode, but: Option<OsString>) -> Self {
         let mut workspace = Self {
             files,
+            review: None,
             branches: None,
             side: Side::Files,
             main_focused: false,
@@ -121,14 +128,20 @@ impl Workspace {
 
     fn panel(&mut self, side: Side) -> Option<&mut dyn Panel> {
         match side {
-            Side::Files => Some(&mut self.files),
+            Side::Files => Some(match &mut self.review {
+                Some(review) => review as &mut dyn Panel,
+                None => &mut self.files,
+            }),
             Side::Branches => self.branches.as_mut().map(|h| h as &mut dyn Panel),
         }
     }
 
     fn panel_ref(&self, side: Side) -> Option<&dyn Panel> {
         match side {
-            Side::Files => Some(&self.files),
+            Side::Files => Some(match &self.review {
+                Some(review) => review as &dyn Panel,
+                None => &self.files,
+            }),
             Side::Branches => self.branches.as_ref().map(|h| h as &dyn Panel),
         }
     }
@@ -151,7 +164,30 @@ impl Workspace {
         };
         let command = panel.handle_key(key, height);
         self.main_focused = panel.main_focused();
+        if side == Side::Branches {
+            self.open_review();
+        }
         command
+    }
+
+    /// Show the review the branches panel asked for in the Files panel
+    /// and focus it. The review already open stays, comments and all,
+    /// when it shows the same snapshot.
+    fn open_review(&mut self) {
+        let Some(snapshot) = self
+            .branches
+            .as_mut()
+            .and_then(History::take_review_request)
+        else {
+            return;
+        };
+        if !self.review.as_ref().is_some_and(|r| r.shows(&snapshot)) {
+            let Some(dir) = self.files.repo_dir() else {
+                return;
+            };
+            self.review = Some(SnapshotPanel::review(dir, snapshot));
+        }
+        self.focus(Side::Files, false);
     }
 
     /// Inner height of the half with focus; `main` is the main view's.
@@ -223,6 +259,10 @@ impl Mode for Workspace {
                 self.focus(Side::from_number(n).expect("checked by guard"), false);
             }
             KeyCode::Esc if self.main_focused => self.focus(side, false),
+            KeyCode::Esc if side == Side::Files && self.review.is_some() => {
+                self.review = None;
+                self.focus(Side::Files, false);
+            }
             KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right if !self.main_focused => {
                 self.focus(side.step(1), false);
             }

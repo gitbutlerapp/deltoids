@@ -102,7 +102,9 @@ crates/
       history/               #   [2] Branches panel (local, or GitButler's)
         mod.rs               #     drill-down to a commit's files, list rendering
         cursor.rs            #     list selection + scroll
-      files/                 #   FilesMode (working-tree diff; read-only commit view)
+        tree.rs              #     branch rows; GitButler workspace drawn like `but status`
+      files/                 #   FilesMode (working-tree diff; read-only snapshots)
+        snapshot.rs          #     commit or branch snapshot panel, built off the UI thread
         mod.rs               #     FilesMode impl of Mode
         model.rs             #     parse/resolve/diff
         diff_pane.rs         #     diff pane slice

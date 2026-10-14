@@ -7,10 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- TUI: in a GitButler workspace, press `Enter` on a commit to review it in the Files panel, or on an applied branch to review all its commits as one diff, with Jev tags and comments. `Esc` returns to the working tree.
+
 ### Changed
 
 - TUI: a commit's preview reads like `git show`: its id, author, date, and message above the diff of every file it changes.
-- TUI: in a GitButler workspace, the Branches panel becomes a Workspace panel that shows the workspace's branches like `but status`: each stack's branches with their commits, and the base commit in the bottom border. Unapplied branches are listed below. Select a commit to preview its diff, and press `Enter` to open it.
+- TUI: in a GitButler workspace, the Branches panel becomes a Workspace panel that shows the workspace's branches like `but status`: each stack's branches with their commits, closed by the common base. Unapplied branches are listed below. Select a commit to preview it. A branch's log stops at the base. `Enter` on an unapplied branch lists its commits.
 
 ## [0.14.0] - 2026-10-13
 

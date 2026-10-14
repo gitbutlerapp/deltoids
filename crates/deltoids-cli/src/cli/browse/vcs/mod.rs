@@ -101,7 +101,7 @@ pub(in crate::cli::browse) struct StatusCommit {
 /// The commit every applied stack rests on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::cli::browse) struct Base {
-    pub(in crate::cli::browse) short_id: String,
+    pub(in crate::cli::browse) id: String,
     /// `YYYY-MM-DD`.
     pub(in crate::cli::browse) date: String,
     pub(in crate::cli::browse) summary: String,
@@ -126,6 +126,8 @@ pub(in crate::cli::browse) struct Branch {
     pub(in crate::cli::browse) commits: Vec<StatusCommit>,
     /// The ref [`Vcs::commits`] walks.
     rev: String,
+    /// Where [`Vcs::commits`] stops: the workspace's base in GitButler.
+    base: Option<String>,
 }
 
 /// A repository the TUI reads and writes.
@@ -197,6 +199,7 @@ impl Vcs {
                             summary: branch.summary,
                             time: branch.time,
                             commits: Vec::new(),
+                            base: None,
                         })
                         .collect(),
                     ..OverviewContent::default()
@@ -237,16 +240,30 @@ impl Vcs {
             .filter(|branch| !applied.contains(branch.name.as_str()))
             .collect();
         content.others = others;
+        let base = content.base.as_ref().map(|base| base.id.clone());
+        let stacked = content
+            .stacks
+            .iter_mut()
+            .flatten()
+            .flat_map(|stack| &mut stack.branches);
+        for branch in stacked.chain(&mut content.others) {
+            branch.base = base.clone();
+        }
         Ok(content)
     }
 
-    /// Up to `limit` commits of `branch`, newest first.
+    /// Up to `limit` commits of `branch`, newest first. In a GitButler
+    /// workspace the walk stops at the workspace's base, so it lists only
+    /// what the branch adds.
     pub(in crate::cli::browse) fn commits(
         &self,
         branch: &Branch,
         limit: usize,
     ) -> Result<Vec<git::Commit>, String> {
-        self.repo.commits(&branch.rev, limit)
+        match &branch.base {
+            Some(base) => self.repo.commits_after(base, &branch.rev, limit),
+            None => self.repo.commits(&branch.rev, limit),
+        }
     }
 
     /// Writes on this repository's working tree, to run on a worker

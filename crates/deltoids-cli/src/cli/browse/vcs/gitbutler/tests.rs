@@ -243,7 +243,7 @@ fn a_workspace_overview_holds_what_but_status_lists() {
     assert_eq!(
         content.base,
         Some(Base {
-            short_id: "3917b63".into(),
+            id: "3917b63b1afceb59f7c748f6bfe40c5c8bceeb93".into(),
             date: "2026-10-14".into(),
             summary: "init".into(),
             behind: 0,
