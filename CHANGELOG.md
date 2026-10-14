@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-14
+
 ### Added
 
 - TUI: in a GitButler workspace, press `Enter` on a commit to review it in the Files panel, or on an applied branch to review all its commits as one diff, with Jev tags and comments. `Esc` returns to the working tree.
