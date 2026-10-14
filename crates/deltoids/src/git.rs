@@ -818,7 +818,9 @@ mod tests {
     /// so the outer tree shows an unstaged submodule commit bump. Uses the
     /// git CLI throughout (libgit2 cannot `submodule add`).
     fn setup_submodule_bump(dir: &Path) {
-        let src = dir.parent().unwrap().join("sub_src");
+        let mut src_name = dir.file_name().unwrap().to_os_string();
+        src_name.push("_sub_src");
+        let src = dir.with_file_name(src_name);
         fs::create_dir_all(&src).unwrap();
         git_cli(&src, &["init", "-q"]);
         fs::write(src.join("file.txt"), "v1\n").unwrap();
