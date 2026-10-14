@@ -146,6 +146,8 @@ pub(super) fn make_state(files: &[ResolvedFile]) -> FilesMode {
         hide_low: false,
         label: "Files".to_string(),
         read_only: false,
+        commit: None,
+        whole: false,
     };
     state.start_review();
     state

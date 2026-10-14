@@ -18,9 +18,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use deltoids::render_tui::{self, pane_block_with_title_line, pane_border_color, rgb_to_color};
-use deltoids::{ChangeLayout, Hunk, LineKind, Theme};
+use deltoids::{ChangeLayout, Hunk, LineKind, Theme, git};
 
 use deltoids::parse::FileDiff;
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 
 use crate::cli::browse::comment_view::{highlight_row, with_comments};
 use crate::cli::browse::comments::{CommentAnchor, CommentStore, Numbering, numbered_lines};
@@ -30,6 +32,7 @@ use crate::cli::browse::diff_cursor::{
 use crate::cli::browse::diff_scrollbar;
 use crate::cli::browse::mode::{DrawBudget, layout_label};
 use crate::cli::browse::syntax_badge::with_syntax_badge;
+use crate::cli::browse::text::{display_width, wrap_text};
 use crate::sidebar::{
     FileMode, IconMode, ModeChange, RowNote, display_path, file_metadata, render_note, symlink_icon,
 };
@@ -50,6 +53,59 @@ pub(super) struct CacheEpoch {
     pub(super) width: usize,
     pub(super) layout: ChangeLayout,
     pub(super) syntax_theme: &'static str,
+}
+
+/// A commit's header as `git show` prints it above the diff, ending in a
+/// blank line: the full id, the author, the date in this machine's time
+/// zone, and the whole message indented four columns, its wider lines
+/// wrapped to `width`.
+fn commit_header(commit: &git::Commit, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    const INDENT: &str = "    ";
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("commit "),
+            Span::styled(
+                commit.id.clone(),
+                Style::default().fg(rgb_to_color(theme.status_modified)),
+            ),
+        ]),
+        Line::raw(format!("Author: {} <{}>", commit.author, commit.email)),
+        Line::raw(format!(
+            "Date:   {}",
+            git_date(commit.time, &TimeZone::system())
+        )),
+        Line::default(),
+    ];
+    let room = width.saturating_sub(INDENT.len()).max(1);
+    for line in commit.message.trim_end().lines() {
+        if line.trim().is_empty() {
+            lines.push(Line::default());
+        } else if display_width(line) <= room {
+            lines.push(Line::raw(format!("{INDENT}{line}")));
+        } else {
+            let wrapped = wrap_text(line, room);
+            lines.extend(
+                wrapped
+                    .into_iter()
+                    .map(|part| Line::raw(format!("{INDENT}{part}"))),
+            );
+        }
+    }
+    lines.push(Line::default());
+    lines
+}
+
+/// `Tue Oct 13 15:07:15 2026 +0200`: `time` (seconds since the epoch)
+/// in `zone`, as git prints dates by default.
+fn git_date(time: i64, zone: &TimeZone) -> String {
+    Timestamp::from_second(time).map_or_else(
+        |_| time.to_string(),
+        |at| {
+            at.to_zoned(zone.clone())
+                .strftime("%a %b %-d %T %Y %z")
+                .to_string()
+        },
+    )
 }
 
 /// Render one file's block: file header, an optional rename header, then
@@ -464,6 +520,7 @@ fn placeholder_file_block(
 #[derive(PartialEq, Eq)]
 struct WindowKey {
     files: Option<Vec<usize>>,
+    header: Option<String>,
     epoch: CacheEpoch,
     blocks: u64,
     comments: u64,
@@ -532,6 +589,8 @@ pub(super) struct DiffPane {
     current_layout: ChangeLayout,
     /// What the no-files render shows: the clean state or a build error.
     empty_state: EmptyPane,
+    /// The commit whose `git show` header tops the window, if any.
+    header: Option<git::Commit>,
 }
 
 impl DiffPane {
@@ -553,6 +612,17 @@ impl DiffPane {
             window_complete: false,
             current_layout: ChangeLayout::Grouped,
             empty_state: EmptyPane::NoChanges,
+            header: None,
+        }
+    }
+
+    /// Top the window with `commit`'s header, scrolling with the diff,
+    /// or drop the header with `None`.
+    pub(super) fn set_header(&mut self, commit: Option<git::Commit>) {
+        if self.header != commit {
+            self.header = commit;
+            self.window_key = None;
+            self.cursor.scroll = 0;
         }
     }
 
@@ -612,6 +682,7 @@ impl DiffPane {
             files: display_range
                 .clone()
                 .map(|range| spec.order[range].to_vec()),
+            header: self.header.as_ref().map(|commit| commit.id.clone()),
             epoch: CacheEpoch {
                 width,
                 layout,
@@ -658,14 +729,14 @@ impl DiffPane {
             return;
         }
         let files = key.files.clone().unwrap_or_default();
-        self.window_complete =
-            matches!(files.as_slice(), [file] if self.cache.complete(key.epoch, *file));
+        self.window_complete = self.header.is_none()
+            && matches!(files.as_slice(), [file] if self.cache.complete(key.epoch, *file));
         if files.is_empty() {
             self.set_window(Vec::new(), false);
             return;
         }
 
-        let mut window = Vec::new();
+        let mut window = self.header_rows(width, theme);
         let mut starts = Vec::new();
         for (i, input_idx) in files.into_iter().enumerate() {
             if i > 0 {
@@ -705,6 +776,15 @@ impl DiffPane {
         self.set_window(window, cursor_ready);
         key.blocks = self.cache.revision;
         self.window_key = Some(key);
+    }
+
+    /// The commit header's rows, which the cursor skips; none without one.
+    fn header_rows(&self, width: usize, theme: &Theme) -> Vec<DiffRow> {
+        self.header
+            .iter()
+            .flat_map(|commit| commit_header(commit, width, theme))
+            .map(DiffRow::plain)
+            .collect()
     }
 
     /// Adopt a freshly-assembled window and put the cursor back on the
@@ -1102,6 +1182,65 @@ mod tests {
         }
     }
     use crate::cli::browse::files::{Focus, handle_key};
+
+    fn commit(message: &str) -> git::Commit {
+        git::Commit {
+            id: "c4b48c0d58e6c879f3e5287150a98f32e4a81f76".into(),
+            short_id: "c4b48c0".into(),
+            summary: message.lines().next().unwrap_or_default().into(),
+            message: message.into(),
+            author: "Juan Ibiapina".into(),
+            email: "juanibiapina@gmail.com".into(),
+            time: 1_791_896_835,
+        }
+    }
+
+    fn header_text(commit: &git::Commit, width: usize) -> Vec<String> {
+        commit_header(commit, width, &Theme::default())
+            .iter()
+            .map(Line::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn the_commit_header_reads_like_git_show() {
+        let commit = commit("style(tui): fit the help row\n\nIt wrapped.\n");
+
+        assert_eq!(
+            header_text(&commit, 80),
+            [
+                "commit c4b48c0d58e6c879f3e5287150a98f32e4a81f76",
+                "Author: Juan Ibiapina <juanibiapina@gmail.com>",
+                format!("Date:   {}", git_date(1_791_896_835, &TimeZone::system())).as_str(),
+                "",
+                "    style(tui): fit the help row",
+                "",
+                "    It wrapped.",
+                "",
+            ]
+        );
+    }
+
+    #[test]
+    fn dates_read_like_git_in_the_given_zone() {
+        let berlin = TimeZone::fixed(jiff::tz::offset(2));
+
+        assert_eq!(
+            git_date(1_791_896_835, &berlin),
+            "Tue Oct 13 15:07:15 2026 +0200"
+        );
+        assert_eq!(git_date(0, &TimeZone::UTC), "Thu Jan 1 00:00:00 1970 +0000");
+    }
+
+    #[test]
+    fn long_message_lines_wrap_under_the_indent() {
+        let commit = commit("one two three four");
+
+        assert_eq!(
+            header_text(&commit, 14)[4..],
+            ["    one two", "    three four", ""]
+        );
+    }
 
     /// Concatenate every cell symbol of a rendered `TestBackend` buffer.
     fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {

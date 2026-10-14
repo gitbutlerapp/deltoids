@@ -280,9 +280,11 @@ impl History {
     /// Point the commit view's own focus where this panel's keys go: its
     /// file tree only while the commit is open with the panel focused.
     fn sync_focus(&mut self) {
-        let main = self.main_focused || self.screen != Screen::Commit;
+        let open = self.screen == Screen::Commit;
+        let main = self.main_focused || !open;
         if let Some(view) = self.current_commit_view() {
             view.focus_main(main);
+            view.show_whole(!open);
         }
     }
 

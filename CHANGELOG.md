@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- TUI: a commit's preview reads like `git show`: its id, author, date, and message above the diff of every file it changes.
+
 ## [0.14.0] - 2026-10-13
 
 ### Added

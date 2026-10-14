@@ -129,7 +129,7 @@ const STARTUP_LOADING_TIMEOUT: Duration = Duration::from_secs(1);
 /// thread. [`Self::ready`] polls it; [`Self::view`] turns the finished
 /// build into the commit's read-only [`FilesMode`].
 pub(super) struct CommitJob {
-    short_id: String,
+    commit: git::Commit,
     receiver: mpsc::Receiver<Result<model::Model, String>>,
     built: Option<Result<model::Model, String>>,
 }
@@ -149,7 +149,7 @@ impl CommitJob {
             let _ = sender.send(built);
         });
         Self {
-            short_id: commit.short_id.clone(),
+            commit: commit.clone(),
             receiver,
             built: None,
         }
@@ -177,8 +177,9 @@ impl CommitJob {
             .built
             .unwrap_or_else(|| Err("The commit's diff is still building".to_string()));
         let mut mode = FilesMode::new(built?, Patches::default(), None, theme, width);
-        mode.label = format!("Commit {}", self.short_id);
+        mode.label = format!("Commit {}", self.commit.short_id);
         mode.read_only = true;
+        mode.commit = Some(self.commit);
         Ok(mode)
     }
 }
@@ -244,6 +245,11 @@ pub(super) struct FilesMode {
     label: String,
     /// A commit snapshot: no staging or discard actions.
     read_only: bool,
+    /// The commit a snapshot shows, for its header.
+    commit: Option<git::Commit>,
+    /// Show the whole snapshot: the commit's header and every file,
+    /// whatever the sidebar selects.
+    whole: bool,
 }
 
 impl FilesMode {
@@ -298,9 +304,7 @@ impl FilesMode {
         focused: bool,
     ) {
         self.diff_rect = right;
-        let spec = self
-            .panes
-            .view(self.sidebar.selection_display_range(), self.column);
+        let spec = self.panes.view(self.selection(), self.column);
         let pane = match spec.column {
             Column::Staged => &mut self.staged,
             Column::Unstaged => &mut self.unstaged,
@@ -413,6 +417,8 @@ impl FilesMode {
             hide_low: false,
             label: "Files".to_string(),
             read_only: false,
+            commit: None,
+            whole: false,
         };
         mode.start_review();
         mode
@@ -434,8 +440,7 @@ impl FilesMode {
 
     /// The pane the current selection shows.
     fn spec(&self) -> PaneSpec<'_> {
-        self.panes
-            .view(self.sidebar.selection_display_range(), self.column)
+        self.panes.view(self.selection(), self.column)
     }
 
     /// The column the diff pane shows right now.
@@ -451,6 +456,23 @@ impl FilesMode {
                 Column::Unstaged => Column::Staged,
             };
         }
+    }
+
+    /// Show the whole snapshot, as `git show` does: the commit's header
+    /// above every file's diff. Off, the diff follows the sidebar.
+    pub(super) fn show_whole(&mut self, whole: bool) {
+        self.whole = whole;
+        let header = self.commit.clone().filter(|_| whole);
+        self.staged.set_header(header.clone());
+        self.unstaged.set_header(header);
+    }
+
+    /// The display-order files the diff shows.
+    fn selection(&self) -> Option<std::ops::Range<usize>> {
+        if self.whole {
+            return (!self.display_order.is_empty()).then_some(0..self.display_order.len());
+        }
+        self.sidebar.selection_display_range()
     }
 
     fn start_review(&mut self) {
@@ -556,9 +578,7 @@ impl FilesMode {
         theme: &Theme,
         budget: DrawBudget,
     ) {
-        let spec = self
-            .panes
-            .view(self.sidebar.selection_display_range(), self.column);
+        let spec = self.panes.view(self.selection(), self.column);
         if spec.column != column {
             return;
         }
@@ -1647,6 +1667,45 @@ mod tests {
 
     /// A Files mode focused on the diff pane with its window assembled,
     /// as the first draw would leave it.
+    #[test]
+    fn a_whole_commit_shows_its_header_above_every_file() {
+        let mut state = make_state_with_rects(&[edited("a.rs"), edited("b.rs")]);
+        state.commit = Some(git::Commit {
+            id: "c4b48c0d58e6c879f3e5287150a98f32e4a81f76".into(),
+            short_id: "c4b48c0".into(),
+            summary: "fit the help row".into(),
+            message: "fit the help row".into(),
+            author: "Ada".into(),
+            email: "ada@example.com".into(),
+            time: 0,
+        });
+        let rows = |state: &mut FilesMode| -> Vec<String> {
+            rebuild_window(state);
+            state
+                .unstaged
+                .rows()
+                .iter()
+                .map(|row| line_text(&row.line))
+                .collect()
+        };
+        let at = |rows: &[String], text: &str| rows.iter().position(|row| row.contains(text));
+
+        state.show_whole(true);
+        let whole = rows(&mut state);
+        assert_eq!(at(&whole, "commit c4b48c0"), Some(0), "{whole:#?}");
+        assert!(
+            at(&whole, "fit the help row") < at(&whole, "a.rs"),
+            "{whole:#?}"
+        );
+        assert!(at(&whole, "a.rs") < at(&whole, "b.rs"), "{whole:#?}");
+
+        state.show_whole(false);
+        let one = rows(&mut state);
+        assert_eq!(at(&one, "commit c4b48c0"), None, "{one:#?}");
+        assert!(at(&one, "a.rs").is_some(), "{one:#?}");
+        assert_eq!(at(&one, "b.rs"), None, "{one:#?}");
+    }
+
     fn diff_state(files: &[ResolvedFile]) -> FilesMode {
         let mut state = make_state_with_rects(files);
         state.focus = Focus::Diff;

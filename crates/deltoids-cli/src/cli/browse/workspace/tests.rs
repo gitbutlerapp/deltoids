@@ -495,3 +495,20 @@ fn a_reload_picks_up_new_commits_and_branches() {
     assert!(right_text(&mut workspace).contains("say hi"));
     assert!(panel(&mut workspace, '2').contains("fresh"));
 }
+
+#[test]
+fn an_open_commit_follows_its_file_tree_without_the_header() {
+    let dir = fixture();
+    let mut workspace = workspace(dir.path());
+    press(
+        &mut workspace,
+        &[KeyCode::Char('2'), KeyCode::Char('j'), KeyCode::Enter],
+    );
+    assert!(right_text(&mut workspace).contains("Author: Ada Lovelace"));
+
+    press(&mut workspace, &[KeyCode::Enter]);
+
+    let diff = right_text(&mut workspace);
+    assert!(!diff.contains("Author:"), "{diff}");
+    assert!(diff.contains("fn feature()"), "{diff}");
+}
