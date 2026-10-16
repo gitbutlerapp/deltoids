@@ -1246,7 +1246,7 @@ fn hidden_low_value_files_stay_hidden_across_a_reload() {
 }
 
 #[test]
-fn entering_a_gitbutler_workspace_shows_one_uncommitted_column_and_one_discard() {
+fn gitbutler_adopting_the_repository_shows_one_uncommitted_column_and_one_discard() {
     let (dir, repo) = fixture(&["a.txt"]);
     fs::write(dir.path().join("a.txt"), "staged\n").unwrap();
     stage_all(&repo);
@@ -1255,10 +1255,7 @@ fn entering_a_gitbutler_workspace_shows_one_uncommitted_column_and_one_discard()
     let before = settle(&mut mode).join("\n");
     assert!(before.contains("Staged - Unstaged"), "{before}");
 
-    let head = repo.head().unwrap().peel_to_commit().unwrap();
-    repo.branch("gitbutler/workspace", &head, true).unwrap();
-    drop(head);
-    repo.set_head("refs/heads/gitbutler/workspace").unwrap();
+    crate::cli::browse::vcs::test_support::adopt(dir.path());
     mode.reload(
         Viewport {
             height: 20,

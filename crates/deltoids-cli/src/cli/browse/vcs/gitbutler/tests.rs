@@ -7,7 +7,7 @@ use tempfile::TempDir;
 
 #[cfg(unix)]
 use super::super::test_support::stub_but;
-use super::super::test_support::{but_log, fixture};
+use super::super::test_support::{adopt, but_log, fixture};
 use super::super::{Base, Columns, DiscardKind, Vcs, Writer};
 
 fn commit_all(repo: &Repository, message: &str) {
@@ -35,8 +35,14 @@ fn repo_with(files: &[&str]) -> (TempDir, Repository) {
     (dir, repo)
 }
 
-/// Move `HEAD` onto a GitButler workspace branch at the current commit.
+/// Move `HEAD` onto a GitButler workspace branch at the current commit,
+/// as `but` does once it applies a second branch.
 fn enter_workspace(repo: &Repository) {
+    adopt(repo.workdir().unwrap());
+    move_to_workspace_branch(repo);
+}
+
+fn move_to_workspace_branch(repo: &Repository) {
     let head = repo.head().unwrap().peel_to_commit().unwrap();
     repo.branch("gitbutler/workspace", &head, true).unwrap();
     repo.set_head("refs/heads/gitbutler/workspace").unwrap();
@@ -91,6 +97,30 @@ fn a_workspace_shows_one_column_of_changes_against_head() {
             ("untracked.txt", None, Some(StageChange::Added)),
         ]
     );
+}
+
+#[test]
+fn a_single_branch_repository_but_adopted_shows_one_column() {
+    let (dir, _repo) = repo_with(&["a.txt"]);
+    adopt(dir.path());
+    fs::write(dir.path().join("a.txt"), "edit\n").unwrap();
+    let working = Vcs::discover_at(dir.path())
+        .unwrap()
+        .working_tree()
+        .unwrap();
+    assert_eq!(working.columns, Columns::Single);
+}
+
+#[test]
+fn a_workspace_branch_without_a_gitbutler_target_is_plain_git() {
+    let (dir, repo) = repo_with(&["a.txt"]);
+    move_to_workspace_branch(&repo);
+    fs::write(dir.path().join("a.txt"), "edit\n").unwrap();
+    let working = Vcs::discover_at(dir.path())
+        .unwrap()
+        .working_tree()
+        .unwrap();
+    assert_eq!(working.columns, Columns::Split);
 }
 
 #[test]
@@ -278,6 +308,33 @@ fn the_workspace_runs_but_again_only_after_a_ref_moves() {
     let head = repo.head().unwrap().peel_to_commit().unwrap();
     repo.branch("new-branch", &head, false).unwrap();
     vcs.overview();
+    assert_eq!(
+        but_log(stubs.path()),
+        ["status", "branch list", "status", "branch list"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_workspace_is_read_again_after_gitbutler_lets_go_and_adopts_again() {
+    let (dir, _repo) = repo_with(&["a.txt"]);
+    adopt(dir.path());
+    let stubs = tempfile::tempdir().unwrap();
+    let mut vcs = stubbed(dir.path(), stubs.path(), "but-status.json");
+    vcs.overview();
+
+    Repository::open(dir.path())
+        .unwrap()
+        .config()
+        .unwrap()
+        .open_level(git2::ConfigLevel::Local)
+        .unwrap()
+        .remove("gitbutler.project.targetRef")
+        .unwrap();
+    assert_eq!(vcs.overview().label, "Local branches");
+    adopt(dir.path());
+    vcs.overview();
+
     assert_eq!(
         but_log(stubs.path()),
         ["status", "branch list", "status", "branch list"]

@@ -94,11 +94,15 @@ impl Repo {
         self.0.commondir()
     }
 
-    /// The ref `HEAD` points at (`refs/heads/main`), or `None` when `HEAD`
-    /// is detached or unreadable.
-    pub fn head_ref(&self) -> Option<String> {
-        let head = self.0.find_reference("HEAD").ok()?;
-        head.symbolic_target().ok().flatten().map(str::to_string)
+    /// The value of `name` in the repository's own config, ignoring global
+    /// and system config.
+    pub fn local_config_string(&self, name: &str) -> Option<String> {
+        let config = self.0.config().ok()?;
+        config
+            .open_level(git2::ConfigLevel::Local)
+            .ok()?
+            .get_string(name)
+            .ok()
     }
 
     /// A fingerprint of `HEAD` and every ref's name and target. Two equal

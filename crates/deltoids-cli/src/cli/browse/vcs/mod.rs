@@ -4,9 +4,9 @@
 //! [`Vcs`] answers every question the panels ask (the working tree's
 //! changes, the branch list, a branch's commits) and hands out a
 //! [`Writer`] for stage and discard. It works out which kind of
-//! repository it holds on every call, from where `HEAD` points, so it
-//! follows `but setup` and `but teardown` while the TUI runs. Callers
-//! never learn which kind it is.
+//! repository it holds on every call, from whether the repository's
+//! config holds a GitButler target, so it follows `but` adopting the
+//! repository while the TUI runs. Callers never learn which kind it is.
 //!
 //! - Git: staged and unstaged columns, local branches, and writes through
 //!   the index and the git CLI ([`git_writes`]).
@@ -39,7 +39,7 @@ enum Backend {
 
 impl Backend {
     fn of(repo: &git::Repo) -> Self {
-        if gitbutler::is_workspace(repo.head_ref().as_deref()) {
+        if gitbutler::manages(repo) {
             Self::GitButler
         } else {
             Self::Git
@@ -183,44 +183,52 @@ impl Vcs {
     }
 
     /// What the branches panel shows. GitButler's costs two `but` runs,
-    /// so it is read again only after a ref moves.
+    /// so it is read again only after a ref moves or GitButler adopts the
+    /// repository again.
     pub(in crate::cli::browse) fn overview(&mut self) -> Overview {
         match self.backend() {
-            Backend::Git => Overview {
-                label: "Local branches",
-                content: self.repo.local_branches().map(|branches| OverviewContent {
-                    others: branches
-                        .into_iter()
-                        .map(|branch| Branch {
-                            id: None,
-                            rev: format!("refs/heads/{}", branch.name),
-                            name: branch.name,
-                            current: branch.head,
-                            summary: branch.summary,
-                            time: branch.time,
-                            commits: Vec::new(),
-                            base: None,
-                        })
-                        .collect(),
-                    ..OverviewContent::default()
-                }),
-            },
-            Backend::GitButler => {
-                let fingerprint = self.repo.refs_fingerprint();
-                let fresh = self
-                    .workspace_cache
-                    .as_ref()
-                    .is_some_and(|(at, _)| *at == fingerprint);
-                if !fresh {
-                    let content = self.read_workspace();
-                    self.workspace_cache = Some((fingerprint, content));
-                }
-                let (_, content) = self.workspace_cache.as_ref().expect("filled above");
-                Overview {
-                    label: "Workspace",
-                    content: content.clone(),
-                }
-            }
+            Backend::Git => self.local_overview(),
+            Backend::GitButler => self.workspace_overview(),
+        }
+    }
+
+    fn local_overview(&mut self) -> Overview {
+        self.workspace_cache = None;
+        Overview {
+            label: "Local branches",
+            content: self.repo.local_branches().map(|branches| OverviewContent {
+                others: branches
+                    .into_iter()
+                    .map(|branch| Branch {
+                        id: None,
+                        rev: format!("refs/heads/{}", branch.name),
+                        name: branch.name,
+                        current: branch.head,
+                        summary: branch.summary,
+                        time: branch.time,
+                        commits: Vec::new(),
+                        base: None,
+                    })
+                    .collect(),
+                ..OverviewContent::default()
+            }),
+        }
+    }
+
+    fn workspace_overview(&mut self) -> Overview {
+        let fingerprint = self.repo.refs_fingerprint();
+        let fresh = self
+            .workspace_cache
+            .as_ref()
+            .is_some_and(|(at, _)| *at == fingerprint);
+        if !fresh {
+            let content = self.read_workspace();
+            self.workspace_cache = Some((fingerprint, content));
+        }
+        let (_, content) = self.workspace_cache.as_ref().expect("filled above");
+        Overview {
+            label: "Workspace",
+            content: content.clone(),
         }
     }
 
@@ -358,7 +366,8 @@ impl PendingDiscard {
 }
 
 /// Stage and discard on one working tree. Each call works out the kind
-/// of repository again, so a `Writer` stays correct across `but setup`.
+/// of repository again, so a `Writer` stays correct when `but` adopts
+/// the repository.
 #[derive(Debug, Clone)]
 pub(in crate::cli::browse) struct Writer {
     workdir: PathBuf,

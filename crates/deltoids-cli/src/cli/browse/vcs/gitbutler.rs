@@ -16,10 +16,12 @@ use super::{Base, Branch, OverviewContent, Stack, StatusCommit};
 /// The `but` executable `Vcs` runs, looked up on `PATH`.
 pub(super) const BUT: &str = "but";
 
-/// Whether `HEAD` sits on one of GitButler's own branches, as it does in
-/// a GitButler workspace.
-pub(super) fn is_workspace(head_ref: Option<&str>) -> bool {
-    head_ref.is_some_and(|reference| reference.starts_with("refs/heads/gitbutler/"))
+/// Whether GitButler manages the repository: `but` records a target in
+/// the repository's config when it adopts it, and keeps it on any branch,
+/// including single-branch mode and after `but teardown`.
+pub(super) fn manages(repo: &git::Repo) -> bool {
+    repo.local_config_string("gitbutler.project.targetRef")
+        .is_some()
 }
 
 /// The working tree as GitButler shows it: one column of uncommitted

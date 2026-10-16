@@ -577,13 +577,9 @@ fn a_commit_review_follows_its_file_tree_without_the_header() {
     assert!(diff.contains("fn feature()"), "{diff}");
 }
 
-/// Move `HEAD` onto a GitButler workspace branch at the current commit.
 #[cfg(unix)]
 fn enter_gitbutler(dir: &Path) {
-    let repo = Repository::open(dir).unwrap();
-    let head = repo.head().unwrap().peel_to_commit().unwrap();
-    repo.branch("gitbutler/workspace", &head, true).unwrap();
-    repo.set_head("refs/heads/gitbutler/workspace").unwrap();
+    crate::cli::browse::vcs::test_support::adopt(dir);
 }
 
 /// A workspace whose branches panel runs a `but` stand-in answering
