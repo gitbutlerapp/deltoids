@@ -1274,3 +1274,29 @@ fn gitbutler_adopting_the_repository_shows_one_uncommitted_column_and_one_discar
     assert!(menu.contains("Discard all changes"), "{menu}");
     assert!(!menu.contains("Discard unstaged changes"), "{menu}");
 }
+
+#[test]
+fn borders_say_when_f_or_shift_f_hides_low_value_changes() {
+    let (dir, _) = fixture(&["src/a.txt"]);
+    fs::write(dir.path().join("src/a.txt"), "edited\n").unwrap();
+    let mut mode = live(dir.path());
+    let top = |mode: &mut FilesMode| screen(mode, DrawBudget::Full)[0].clone();
+    let flags = |top: &str| {
+        let sidebar: String = top.chars().take(30).collect();
+        let diff: String = top.chars().skip(30).collect();
+        (
+            sidebar.ends_with("\u{f0b0}─╮"),
+            diff.ends_with("\u{f0b0}─╮"),
+        )
+    };
+    assert_eq!(flags(&top(&mut mode)), (false, false), "{}", top(&mut mode));
+
+    Mode::handle_key(&mut mode, KeyCode::Char('f'), 20);
+    assert_eq!(flags(&top(&mut mode)), (true, false), "{}", top(&mut mode));
+
+    Mode::handle_key(&mut mode, KeyCode::Char('F'), 20);
+    assert_eq!(flags(&top(&mut mode)), (true, true), "{}", top(&mut mode));
+
+    Mode::handle_key(&mut mode, KeyCode::Char('f'), 20);
+    assert_eq!(flags(&top(&mut mode)), (false, true), "{}", top(&mut mode));
+}

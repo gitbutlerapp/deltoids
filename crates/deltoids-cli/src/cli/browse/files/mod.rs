@@ -1362,6 +1362,9 @@ impl panel::Panel for FilesMode {
             focused,
             theme,
         );
+        if self.hide_low {
+            panel::draw_filter_flag(frame, area, theme);
+        }
     }
 
     fn draw_main(

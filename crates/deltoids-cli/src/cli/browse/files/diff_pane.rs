@@ -31,6 +31,7 @@ use crate::cli::browse::diff_cursor::{
 };
 use crate::cli::browse::diff_scrollbar;
 use crate::cli::browse::mode::{DrawBudget, layout_label};
+use crate::cli::browse::panel::draw_filter_flag;
 use crate::cli::browse::syntax_badge::with_syntax_badge;
 use crate::cli::browse::text::{display_width, wrap_text};
 use crate::sidebar::{
@@ -639,6 +640,8 @@ pub(super) struct DiffPane {
     empty_state: EmptyPane,
     /// The commit whose `git show` header tops the window, if any.
     header: Option<git::Commit>,
+    /// Low-value hunks are collapsed; the title says so.
+    hide_low: bool,
 }
 
 impl DiffPane {
@@ -661,6 +664,7 @@ impl DiffPane {
             current_layout: ChangeLayout::Grouped,
             empty_state: EmptyPane::NoChanges,
             header: None,
+            hide_low: false,
         }
     }
 
@@ -697,8 +701,16 @@ impl DiffPane {
         self.empty_state = EmptyPane::NoChanges;
     }
 
-    /// Record what this draw shows: title, emptiness, width, and layout.
-    fn adopt_spec(&mut self, spec: &PaneSpec<'_>, width: usize, layout: ChangeLayout) {
+    /// Record what this draw shows: title, emptiness, width, layout, and
+    /// whether low-value hunks are collapsed.
+    fn adopt_spec(
+        &mut self,
+        spec: &PaneSpec<'_>,
+        width: usize,
+        layout: ChangeLayout,
+        hide_low: bool,
+    ) {
+        self.hide_low = hide_low;
         debug_assert_eq!(spec.column, self.column);
         self.current_layout = layout;
         self.cached_width = width;
@@ -724,7 +736,7 @@ impl DiffPane {
         comments: &CommentStore,
         labels: &HunkLabels<'_>,
     ) {
-        self.adopt_spec(spec, width, layout);
+        self.adopt_spec(spec, width, layout, labels.hide_low);
         let display_range = spec.range.clone();
         let mut key = WindowKey {
             files: display_range
@@ -825,6 +837,23 @@ impl DiffPane {
         self.set_window(window, cursor_ready);
         key.blocks = self.cache.revision;
         self.window_key = Some(key);
+    }
+
+    /// The border with its title, flagged while low-value hunks are
+    /// collapsed.
+    fn draw_border(
+        &self,
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        color: Color,
+        footer: Option<Line<'static>>,
+        theme: &Theme,
+    ) {
+        let block = pane_block_with_title_line(heading(self.title, theme), color, footer);
+        frame.render_widget(block, area);
+        if self.hide_low {
+            draw_filter_flag(frame, area, theme);
+        }
     }
 
     /// The commit header's rows, which the cursor skips; none without one.
@@ -1041,13 +1070,12 @@ impl DiffPane {
         // either the clean "No local changes." line (a reverted/committed
         // tree or a non-repo) or a build-error message.
         if self.empty {
-            let block = pane_block_with_title_line(
-                heading(self.title, theme),
-                color,
-                status.map(|message| Line::from(format!(" {message} "))),
-            );
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
+            let footer = status.map(|message| Line::from(format!(" {message} ")));
+            self.draw_border(frame, area, color, footer, theme);
+            let inner = area.inner(ratatui::layout::Margin {
+                vertical: 1,
+                horizontal: 1,
+            });
             match &self.empty_state {
                 EmptyPane::NoChanges | EmptyPane::Loading => {
                     let text = match self.empty_state {
@@ -1126,8 +1154,7 @@ impl DiffPane {
             .map(|status| format!(" {status} "))
             .or_else(|| self.footer())
             .map(Line::from);
-        let block = pane_block_with_title_line(heading(self.title, theme), color, footer);
-        frame.render_widget(block, area);
+        self.draw_border(frame, area, color, footer, theme);
         frame.render_widget(Paragraph::new(visible), inner);
 
         // Vertical scrollbar reflects the assembled window: when the

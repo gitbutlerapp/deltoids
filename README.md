@@ -137,6 +137,7 @@ file shows its hunk that needs the most attention. The names of tests, code comm
 lockfiles are muted; press `f` to hide them. Each hunk header shows its
 own tag and dot. Press `F` to collapse test, comment, and import hunks
 inside the diff to their header, which still shows where each starts.
+While either is on, a funnel sits at the right of that panel's top border.
 
 Set `TYPESAFE_API_KEY` to let TypeSafe's Jev model judge each change
 when the TUI opens. Every changed file goes to Jev except package

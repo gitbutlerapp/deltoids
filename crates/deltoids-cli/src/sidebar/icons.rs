@@ -34,6 +34,15 @@ impl IconMode {
     }
 }
 
+/// Funnel shown on a pane border while a filter hides changes, or a
+/// plain triangle when icons are disabled.
+pub fn filter_icon(mode: IconMode) -> &'static str {
+    match mode {
+        IconMode::On => "\u{f0b0}",
+        IconMode::Off => "▽",
+    }
+}
+
 /// The nerd-font symlink glyph used by the symlink change view.
 const SYMLINK_GLYPH: &str = "\u{f481}";
 

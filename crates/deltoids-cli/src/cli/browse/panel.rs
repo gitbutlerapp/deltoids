@@ -13,11 +13,14 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
 use deltoids::render_tui::rgb_to_color;
 use deltoids::{ChangeLayout, Theme};
 
 use super::mode::{AppCommand, BackgroundWork, DrawBudget};
+use crate::sidebar::{IconMode, filter_icon};
 
 pub(super) trait Panel {
     /// Draw the side panel into `area`, titled with its `number`.
@@ -104,6 +107,26 @@ pub(crate) fn panel_title(
         Span::styled(label.to_string(), accent),
         Span::styled("─", rule),
     ])
+}
+
+/// Paint the filter glyph at the right end of `area`'s top border, one
+/// rule in from the corner, to say a filter hides some changes.
+pub(crate) fn draw_filter_flag(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    let glyph = filter_icon(IconMode::from_env());
+    let width = glyph.width() as u16;
+    if area.width < width + 4 || area.height == 0 {
+        return;
+    }
+    let flag = Rect {
+        x: area.right() - 2 - width,
+        y: area.y,
+        width,
+        height: 1,
+    };
+    let style = Style::default()
+        .fg(rgb_to_color(theme.border_active))
+        .add_modifier(Modifier::BOLD);
+    frame.render_widget(Paragraph::new(Span::styled(glyph, style)), flag);
 }
 
 #[cfg(test)]
