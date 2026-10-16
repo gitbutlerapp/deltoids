@@ -76,7 +76,8 @@ fn text(buffer: &Buffer) -> Vec<String> {
         .collect()
 }
 
-fn draw(mode: &mut impl Mode) -> Buffer {
+/// One frame, without waiting for background work.
+pub(super) fn draw(mode: &mut impl Mode) -> Buffer {
     let theme = Theme::default();
     let mut term = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
     term.draw(|frame| {

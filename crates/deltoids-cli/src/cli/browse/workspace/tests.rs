@@ -10,7 +10,7 @@ use super::Workspace;
 use crate::cli::browse::files::FilesMode;
 use crate::cli::browse::mode::{Mode, Viewport};
 use crate::cli::browse::test_screen::{
-    LEFT, PANE_HEIGHT, left_border_focused, left_text, right_focused, right_text,
+    LEFT, PANE_HEIGHT, draw, left_border_focused, left_text, right_focused, right_text,
 };
 #[cfg(unix)]
 use crate::cli::browse::vcs::test_support::{fixture as but_fixture, stub_but};
@@ -382,6 +382,19 @@ fn the_main_view_shows_the_selected_commit_diff() {
     let right = right_text(&mut workspace);
     assert!(right.contains("hello"), "{right}");
     assert!(!right.contains("HELLO"), "{right}");
+}
+
+#[test]
+fn a_preview_that_finishes_after_enter_lets_the_screen_settle() {
+    let dir = fixture();
+    let mut workspace = workspace(dir.path());
+    press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Enter]);
+    // One frame starts the selected commit's preview; Enter opens the
+    // review before the preview is ever drawn again.
+    draw(&mut workspace);
+    press(&mut workspace, &[KeyCode::Enter]);
+
+    assert!(panel(&mut workspace, '1').contains("Commit "));
 }
 
 #[test]

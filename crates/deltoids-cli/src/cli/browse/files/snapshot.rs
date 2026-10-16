@@ -273,12 +273,14 @@ impl Panel for SnapshotPanel {
     }
 
     /// While building: pending until the build is ready to adopt, then
-    /// changed so the next frame adopts it.
+    /// changed once so the next frame adopts it. A panel off screen keeps
+    /// its build until a draw adopts it.
     fn background(&mut self, active: bool) -> BackgroundWork {
         if self.view.is_none() {
+            let announced = self.built.is_some();
             let ready = self.poll();
             return BackgroundWork {
-                changed: ready,
+                changed: ready && !announced,
                 pending: !ready,
             };
         }
