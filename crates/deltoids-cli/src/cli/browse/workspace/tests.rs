@@ -293,7 +293,7 @@ fn enter_on_a_commit_file_focuses_its_diff() {
         &mut workspace,
         &[KeyCode::Char('2'), KeyCode::Enter, KeyCode::Enter],
     );
-    assert!(panel(&mut workspace, '2').contains("greet.rs"));
+    assert!(panel(&mut workspace, '1').contains("Commit "));
     assert!(!right_focused(&mut workspace));
 
     press(&mut workspace, &[KeyCode::Enter]);
@@ -302,7 +302,7 @@ fn enter_on_a_commit_file_focuses_its_diff() {
     press(&mut workspace, &[KeyCode::Esc]);
     assert!(!right_focused(&mut workspace));
     // Still in the commit's files: Esc left the diff, not the commit.
-    assert!(panel(&mut workspace, '2').contains("greet.rs"));
+    assert!(panel(&mut workspace, '1').contains("Commit "));
 }
 
 #[test]
@@ -385,7 +385,7 @@ fn the_main_view_shows_the_selected_commit_diff() {
 }
 
 #[test]
-fn enter_on_a_branch_drills_into_its_commits_and_files_and_esc_climbs_back() {
+fn enter_on_a_branch_lists_its_commits_and_enter_reviews_one_in_files() {
     let dir = fixture();
     let mut workspace = workspace(dir.path());
     press(
@@ -399,13 +399,16 @@ fn enter_on_a_branch_drills_into_its_commits_and_files_and_esc_climbs_back() {
     assert!(right_text(&mut workspace).contains("fn feature()"));
 
     press(&mut workspace, &[KeyCode::Enter]);
-    let files = panel(&mut workspace, '2');
+    let files = panel(&mut workspace, '1');
     let short = feature_tip(dir.path());
     assert!(files.contains(&format!("Commit {short}")), "{files}");
     assert!(files.contains("feature.rs"), "{files}");
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
     assert!(right_text(&mut workspace).contains("fn feature()"));
 
     press(&mut workspace, &[KeyCode::Esc]);
+    assert!(panel(&mut workspace, '1').contains("[1]─Files"));
+    press(&mut workspace, &[KeyCode::Char('2')]);
     assert!(panel(&mut workspace, '2').contains("Commits (feature)"));
     press(&mut workspace, &[KeyCode::Esc]);
     assert!(panel(&mut workspace, '2').contains("Local branches"));
@@ -477,10 +480,10 @@ fn double_clicking_a_commit_opens_it_like_enter() {
     let commit = row_of(&mut workspace, "add feature");
 
     click(&mut workspace, 5, commit);
-    assert!(panel(&mut workspace, '2').contains("Commits (feature)"));
+    assert!(panel(&mut workspace, '1').contains("[1]─Files"));
     click(&mut workspace, 5, commit);
 
-    let files = panel(&mut workspace, '2');
+    let files = panel(&mut workspace, '1');
     let short = feature_tip(dir.path());
     assert!(files.contains(&format!("Commit {short}")), "{files}");
     assert!(files.contains("feature.rs"), "{files}");
@@ -558,7 +561,7 @@ fn a_reload_picks_up_new_commits_and_branches() {
 }
 
 #[test]
-fn an_open_commit_follows_its_file_tree_without_the_header() {
+fn a_commit_review_follows_its_file_tree_without_the_header() {
     let dir = fixture();
     let mut workspace = workspace(dir.path());
     press(

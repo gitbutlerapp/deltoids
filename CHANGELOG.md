@@ -9,10 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- TUI: double-click a branch or commit in the Branches panel to open it, as `Enter` does. In a GitButler workspace this opens its review in the Files panel.
+- TUI: double-click a branch or commit in the Branches panel to open it, as `Enter` does.
 
 ### Changed
 
+- TUI: `Enter` on a commit in a branch's commit list opens it in the Files panel, as in a GitButler workspace. `Esc` in Files returns to the working tree.
 - TUI: the Files and Branches panels keep their size when you switch between them. Files always takes two thirds of the column.
 
 ## [0.15.0] - 2026-10-14

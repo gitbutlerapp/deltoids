@@ -9,9 +9,8 @@
 //! 2. Branches: the local branches, or a GitButler workspace drawn like
 //!    `but status`. Main shows the selected branch's log or commit's
 //!    diff. Drills down into a branch's commits (main: the selected
-//!    commit's diff) and a commit's files. In a GitButler workspace,
-//!    `Enter` on an applied branch or one of its commits opens its
-//!    review in Files.
+//!    commit's diff). `Enter` on a commit, or on an applied GitButler
+//!    branch, opens its review in Files.
 //!
 //! Focus is on one side panel or on the main view. Files takes two
 //! thirds of the column and Branches one third. `1`/`2` focus a side

@@ -100,7 +100,7 @@ crates/
         mod.rs               #     panel stack, keys, mouse, reload
         tests.rs             #     layout and navigation tests
       history/               #   [2] Branches panel (local, or GitButler's)
-        mod.rs               #     drill-down to a commit's files, list rendering
+        mod.rs               #     drill-down to a branch's commits, list rendering
         cursor.rs            #     list selection + scroll
         tree.rs              #     branch rows; GitButler workspace drawn like `but status`
       files/                 #   FilesMode (working-tree diff; read-only snapshots)
