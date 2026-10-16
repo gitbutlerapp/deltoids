@@ -926,7 +926,7 @@ fn double_clicking_a_workspace_branch_reviews_it_in_files() {
     assert!(files.contains("Review feature"), "{files}");
     assert!(files.contains("feature.rs"), "{files}");
     assert_eq!(focused_panel(&mut workspace), Some('1'));
-    assert!(panel(&mut workspace, '2').contains("[feature]"));
+    assert!(panel(&mut workspace, '2').contains("[2]─Review feature"));
 }
 
 /// Commit `files` on top of `branch` without touching the working tree,
@@ -1031,6 +1031,29 @@ fn enter_on_a_stacked_branch_reviews_its_own_commits_in_files() {
     let right = right_text(&mut workspace);
     assert!(right.contains("final"), "{right}");
     assert!(!right.contains("draft"), "{right}");
+
+    let details = panel(&mut workspace, '2');
+    assert!(details.contains("[2]─Review upper"), "{details}");
+    assert!(details.contains("finish upper"), "{details}");
+    assert!(!details.contains("draft upper"), "{details}");
+
+    press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Char('G')]);
+    let details = panel(&mut workspace, '2');
+    assert!(details.contains("draft upper"), "{details}");
+    assert!(!details.contains("add feature"), "{details}");
+}
+
+#[cfg(unix)]
+#[test]
+fn esc_on_a_branch_review_details_closes_the_review() {
+    let dir = fixture();
+    let stubs = tempfile::tempdir().unwrap();
+    let mut workspace = stacked_workspace(dir.path(), stubs.path());
+    press(&mut workspace, &[KeyCode::Enter]);
+
+    press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Esc]);
+
+    assert!(panel(&mut workspace, '1').contains("[1]─Files"));
     assert!(panel(&mut workspace, '2').contains("[upper]"));
 }
 
@@ -1078,9 +1101,11 @@ fn a_review_keeps_its_comments_until_esc_brings_back_the_working_tree() {
         };
     assert!(copied(&mut workspace).contains("why final"));
 
-    // Away and back to the same branch: the same review, comment kept.
-    press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Enter]);
-    press(&mut workspace, &[KeyCode::Char('0')]);
+    // Away to the Branches panel and back: the same review, comment kept.
+    press(
+        &mut workspace,
+        &[KeyCode::Char('2'), KeyCode::Char('1'), KeyCode::Char('0')],
+    );
     assert!(copied(&mut workspace).contains("why final"));
 
     press(&mut workspace, &[KeyCode::Esc, KeyCode::Esc]);

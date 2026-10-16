@@ -309,6 +309,7 @@ fn a_branch_review_asks_jev_about_its_hunks() {
         name: "feature".to_string(),
         base: format!("{second}^"),
         tip: second,
+        commits: Vec::new(),
     };
 
     let (mut panel, sent) = snapshot_view(dir.path(), snapshot);

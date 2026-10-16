@@ -38,6 +38,8 @@ pub(in crate::cli::browse) enum Snapshot {
         name: String,
         base: String,
         tip: String,
+        /// The commits between, newest first.
+        commits: Vec<git::Commit>,
     },
 }
 
@@ -51,11 +53,20 @@ impl Snapshot {
             name: branch.name.clone(),
             base: format!("{}^", oldest.commit.id),
             tip: tip.commit.id.clone(),
+            commits: branch.commits.iter().map(|c| c.commit.clone()).collect(),
         })
     }
 
+    /// Every commit the snapshot shows, newest first.
+    pub(in crate::cli::browse) fn commits(&self) -> &[git::Commit] {
+        match self {
+            Self::Commit(commit) => std::slice::from_ref(commit),
+            Self::Branch { commits, .. } => commits,
+        }
+    }
+
     /// `Commit <short id>` or `Review <branch>`.
-    fn label(&self) -> String {
+    pub(in crate::cli::browse) fn label(&self) -> String {
         match self {
             Self::Commit(commit) => format!("Commit {}", commit.short_id),
             Self::Branch { name, .. } => format!("Review {name}"),
@@ -128,12 +139,8 @@ impl SnapshotPanel {
         &self.snapshot == snapshot
     }
 
-    /// The commit this panel shows; `None` for a branch.
-    pub(in crate::cli::browse) fn commit(&self) -> Option<&git::Commit> {
-        match &self.snapshot {
-            Snapshot::Commit(commit) => Some(commit),
-            Snapshot::Branch { .. } => None,
-        }
+    pub(in crate::cli::browse) fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
     }
 
     /// Show the whole snapshot, as `git show` does: a commit's header

@@ -16,9 +16,9 @@
 //! at a time, and the main view previews the selected commit's diff.
 //! `Esc` steps back up to the branches, keeping the selection. A double
 //! click on a branch or commit does what `Enter` does on it. While the
-//! Files panel reviews a commit, the side half shows that commit's
-//! details in place of the list ([`History::show_review`]); the list
-//! keys scroll them.
+//! Files panel shows a review, the side half shows the review's commits
+//! and their messages in place of the list ([`History::show_review`]);
+//! the list keys scroll them.
 //!
 //! The lists are a snapshot; [`History::refresh`] re-reads them and keeps
 //! each selection on the same branch or commit.
@@ -45,12 +45,12 @@ use super::mode::{AppCommand, BackgroundWork, DrawBudget};
 use super::panel::{Panel, panel_title};
 use super::vcs::{Branch, Vcs};
 
-mod commit_info;
 mod cursor;
+mod review_info;
 mod tree;
 
-use commit_info::CommitInfo;
 use cursor::Cursor;
+use review_info::ReviewInfo;
 use tree::Tree;
 
 /// How many commits one page of a commit list loads.
@@ -147,8 +147,8 @@ pub(super) struct History {
     preview: Option<SnapshotPanel>,
     /// A review `Enter` asked for, until the workspace takes it.
     review_request: Option<Snapshot>,
-    /// The commit the Files panel reviews, shown in place of the list.
-    reviewing: Option<CommitInfo>,
+    /// What the Files panel reviews, shown in place of the list.
+    reviewing: Option<ReviewInfo>,
     double_click: DoubleClick,
     /// Seconds since the epoch at the last read; commit ages count from
     /// here.
@@ -303,20 +303,20 @@ impl History {
         self.review_request.take()
     }
 
-    /// Show the details of `commit`, the one the Files panel reviews, in
+    /// Show the commits of `snapshot`, what the Files panel reviews, in
     /// place of the list; `None` brings the list back as it was. The
-    /// same commit again keeps its scroll.
-    pub(super) fn show_review(&mut self, commit: Option<&git::Commit>) {
-        let Some(commit) = commit else {
+    /// same snapshot again keeps its scroll.
+    pub(super) fn show_review(&mut self, snapshot: Option<&Snapshot>) {
+        let Some(snapshot) = snapshot else {
             self.reviewing = None;
             return;
         };
         if self
             .reviewing
             .as_ref()
-            .is_none_or(|info| info.commit() != commit)
+            .is_none_or(|info| !info.shows(snapshot))
         {
-            self.reviewing = Some(CommitInfo::new(commit.clone()));
+            self.reviewing = Some(ReviewInfo::new(snapshot.clone()));
         }
     }
 

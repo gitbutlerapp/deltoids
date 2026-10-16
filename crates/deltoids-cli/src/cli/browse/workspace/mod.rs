@@ -10,9 +10,9 @@
 //!    `but status`. Main shows the selected branch's log or commit's
 //!    diff. Drills down into a branch's commits (main: the selected
 //!    commit's diff). `Enter` on a commit, or on an applied GitButler
-//!    branch, opens its review in Files. While Files reviews a commit,
-//!    Branches shows the commit's details, and `Esc` there closes the
-//!    review.
+//!    branch, opens its review in Files. While Files shows a review,
+//!    Branches shows the review's commits and their messages, and `Esc`
+//!    there closes the review.
 //!
 //! Focus is on one side panel or on the main view. Files takes two
 //! thirds of the column and Branches one third. `1`/`2` focus a side
@@ -192,20 +192,13 @@ impl Workspace {
     }
 
     /// Show `review` in the Files panel, or the working tree for `None`,
-    /// and tell the branches panel which commit, if any, is under review.
+    /// and tell the branches panel what, if anything, is under review.
     fn set_review(&mut self, review: Option<SnapshotPanel>) {
         self.review = review;
-        let commit = self.review.as_ref().and_then(SnapshotPanel::commit);
+        let snapshot = self.review.as_ref().map(SnapshotPanel::snapshot);
         if let Some(branches) = self.branches.as_mut() {
-            branches.show_review(commit);
+            branches.show_review(snapshot);
         }
-    }
-
-    /// Whether the branches panel shows the commit under review.
-    fn reviewing_commit(&self) -> bool {
-        self.review
-            .as_ref()
-            .is_some_and(|review| review.commit().is_some())
     }
 
     /// Inner height of the half with focus; `main` is the main view's.
@@ -281,7 +274,7 @@ impl Mode for Workspace {
                 self.set_review(None);
                 self.focus(Side::Files, false);
             }
-            KeyCode::Esc if side == Side::Branches && self.reviewing_commit() => {
+            KeyCode::Esc if side == Side::Branches && self.review.is_some() => {
                 self.set_review(None);
                 self.focus(Side::Branches, false);
             }
