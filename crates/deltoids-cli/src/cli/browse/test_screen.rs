@@ -63,6 +63,13 @@ pub(super) fn right_focused(mode: &mut impl Mode) -> bool {
     corner.fg == pane_border_color(true, &Theme::default())
 }
 
+/// Whether the left column's border cell on `row` shows focus.
+pub(super) fn left_border_focused(mode: &mut impl Mode, row: usize) -> bool {
+    screen(mode);
+    let cell = &draw(mode)[(0, row as u16)];
+    cell.fg == pane_border_color(true, &Theme::default())
+}
+
 fn text(buffer: &Buffer) -> Vec<String> {
     (0..HEIGHT)
         .map(|y| (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect())

@@ -9,7 +9,9 @@ use deltoids::Theme;
 use super::Workspace;
 use crate::cli::browse::files::FilesMode;
 use crate::cli::browse::mode::{Mode, Viewport};
-use crate::cli::browse::test_screen::{LEFT, PANE_HEIGHT, left_text, right_focused, right_text};
+use crate::cli::browse::test_screen::{
+    LEFT, PANE_HEIGHT, left_border_focused, left_text, right_focused, right_text,
+};
 #[cfg(unix)]
 use crate::cli::browse::vcs::test_support::{fixture as but_fixture, stub_but};
 
@@ -149,12 +151,12 @@ fn panel_height(workspace: &mut Workspace, n: char) -> usize {
     panel_rows(workspace, n).count()
 }
 
-/// The side panel with the most rows: the current one.
-fn tallest(workspace: &mut Workspace) -> char {
-    ['1', '2']
-        .into_iter()
-        .max_by_key(|&n| panel_height(workspace, n))
-        .unwrap()
+/// The side panel whose border shows focus, if any.
+fn focused_panel(workspace: &mut Workspace) -> Option<char> {
+    ['1', '2'].into_iter().find(|&n| {
+        let top = *panel_rows(workspace, n).start();
+        left_border_focused(workspace, top)
+    })
 }
 
 #[test]
@@ -178,7 +180,7 @@ fn opens_on_the_files_panel_with_the_working_tree_diff() {
     let dir = fixture();
     let mut workspace = workspace(dir.path());
 
-    assert_eq!(tallest(&mut workspace), '1');
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
     assert!(!right_focused(&mut workspace));
     assert!(panel(&mut workspace, '1').contains("greet.rs"));
     let right = right_text(&mut workspace);
@@ -213,17 +215,32 @@ fn enter_lists_a_branch_commits_newest_first() {
 }
 
 #[test]
-fn number_keys_focus_side_panels_and_the_current_one_grows() {
+fn number_keys_focus_side_panels() {
     let dir = fixture();
     let mut workspace = workspace(dir.path());
 
     for n in ['2', '1'] {
         press(&mut workspace, &[KeyCode::Char(n)]);
-        assert_eq!(tallest(&mut workspace), n);
+        assert_eq!(focused_panel(&mut workspace), Some(n));
     }
     // There is no third panel.
     press(&mut workspace, &[KeyCode::Char('3')]);
-    assert_eq!(tallest(&mut workspace), '1');
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
+}
+
+#[test]
+fn side_panels_keep_their_size_when_focus_moves() {
+    let dir = fixture();
+    let mut workspace = workspace(dir.path());
+    let heights =
+        |workspace: &mut Workspace| (panel_height(workspace, '1'), panel_height(workspace, '2'));
+
+    let (files, branches) = heights(&mut workspace);
+    assert!(files > branches, "files {files}, branches {branches}");
+    for key in [KeyCode::Char('2'), KeyCode::Char('0'), KeyCode::Char('1')] {
+        press(&mut workspace, &[key]);
+        assert_eq!(heights(&mut workspace), (files, branches));
+    }
 }
 
 #[test]
@@ -232,11 +249,11 @@ fn tab_and_shift_tab_switch_between_the_side_panels() {
     let mut workspace = workspace(dir.path());
 
     press(&mut workspace, &[KeyCode::Tab]);
-    assert_eq!(tallest(&mut workspace), '2');
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
     press(&mut workspace, &[KeyCode::Tab]);
-    assert_eq!(tallest(&mut workspace), '1');
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
     press(&mut workspace, &[KeyCode::BackTab]);
-    assert_eq!(tallest(&mut workspace), '2');
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
     assert!(!right_focused(&mut workspace));
 }
 
@@ -246,13 +263,13 @@ fn h_and_l_switch_between_the_side_panels() {
     let mut workspace = workspace(dir.path());
 
     press(&mut workspace, &[KeyCode::Char('l')]);
-    assert_eq!(tallest(&mut workspace), '2');
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
     press(&mut workspace, &[KeyCode::Right]);
-    assert_eq!(tallest(&mut workspace), '1');
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
     press(&mut workspace, &[KeyCode::Char('h')]);
-    assert_eq!(tallest(&mut workspace), '2');
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
     press(&mut workspace, &[KeyCode::Left]);
-    assert_eq!(tallest(&mut workspace), '1');
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
 }
 
 #[test]
@@ -265,7 +282,7 @@ fn enter_on_a_file_focuses_its_diff_and_esc_comes_back() {
 
     press(&mut workspace, &[KeyCode::Esc]);
     assert!(!right_focused(&mut workspace));
-    assert_eq!(tallest(&mut workspace), '1');
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
 }
 
 #[test]
@@ -317,7 +334,8 @@ fn tab_in_the_main_view_never_leaves_it() {
     press(&mut workspace, &[KeyCode::Tab]);
 
     assert!(right_focused(&mut workspace));
-    assert_eq!(tallest(&mut workspace), '2');
+    press(&mut workspace, &[KeyCode::Esc]);
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
 }
 
 #[test]
@@ -436,7 +454,7 @@ fn clicking_a_panel_row_focuses_the_panel_and_selects_the_row() {
 
     click(&mut workspace, 5, feature);
 
-    assert_eq!(tallest(&mut workspace), '2');
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
     assert!(right_text(&mut workspace).contains("add feature"));
 }
 
@@ -454,7 +472,7 @@ fn a_comment_editor_takes_digits_and_tab_as_text() {
     press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Tab]);
 
     assert!(workspace.captures_text_input());
-    assert_eq!(tallest(&mut workspace), '1');
+    assert!(right_focused(&mut workspace));
 }
 
 #[test]
@@ -603,6 +621,7 @@ fn a_gitbutler_workspace_panel_reads_like_but_status() {
         ])
         .map(fit)
         .collect();
+    let tail = &tail[tail.len().saturating_sub(bottom.len())..];
     assert_eq!(
         bottom[bottom.len() - tail.len()..],
         tail[..],
@@ -693,7 +712,7 @@ fn a_commit_row_previews_its_diff_and_enter_reviews_it_in_files() {
     assert!(files.contains("Commit "), "{files}");
     assert!(files.contains("feature.rs"), "{files}");
     assert!(!files.contains("greet.rs"), "{files}");
-    assert_eq!(tallest(&mut workspace), '1');
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
     assert!(panel(&mut workspace, '2').contains("abcd add feature"));
     assert!(right_text(&mut workspace).contains("fn feature()"));
 
@@ -799,7 +818,7 @@ fn enter_on_a_stacked_branch_reviews_its_own_commits_in_files() {
     assert!(files.contains("upper.rs"), "{files}");
     assert!(!files.contains("feature.rs"), "{files}");
     assert!(!files.contains("greet.rs"), "{files}");
-    assert_eq!(tallest(&mut workspace), '1');
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
     assert!(files.contains("upper.md"), "{files}");
     press(&mut workspace, &[KeyCode::Char('j')]);
     let right = right_text(&mut workspace);
@@ -876,7 +895,7 @@ fn enter_on_an_empty_branch_does_nothing() {
     press(&mut workspace, &[KeyCode::Enter]);
 
     assert!(panel(&mut workspace, '1').contains("[1]─Files"));
-    assert_eq!(tallest(&mut workspace), '2');
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
 }
 
 #[cfg(unix)]

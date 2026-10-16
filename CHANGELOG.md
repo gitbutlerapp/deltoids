@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- TUI: the Files and Branches panels keep their size when you switch between them. Files always takes two thirds of the column.
+
 ## [0.15.0] - 2026-10-14
 
 ### Added

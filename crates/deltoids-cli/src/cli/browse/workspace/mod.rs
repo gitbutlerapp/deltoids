@@ -13,8 +13,8 @@
 //!    `Enter` on an applied branch or one of its commits opens its
 //!    review in Files.
 //!
-//! Focus is on one side panel or on the main view. The current side
-//! panel takes the larger share of the column. `1`/`2` focus a side
+//! Focus is on one side panel or on the main view. Files takes two
+//! thirds of the column and Branches one third. `1`/`2` focus a side
 //! panel and `0` the main view; `Tab`/`Shift+Tab`, `h`/`l`, and the
 //! arrows switch side panels. `Enter` on a file focuses its diff, and
 //! `Esc` leaves the main view. Every other key, `Tab` in the main view
@@ -228,7 +228,7 @@ impl Mode for Workspace {
         theme: &Theme,
         budget: DrawBudget,
     ) {
-        self.side_rects = side_layout(left, self.side);
+        self.side_rects = side_layout(left);
         self.main_rect = right;
         let (current, main_focused) = (self.side, self.main_focused);
         for side in Side::ALL {
@@ -356,16 +356,12 @@ impl Mode for Workspace {
     }
 }
 
-/// Split the left column into the side panels, the current one taking
-/// the larger share.
-fn side_layout(area: Rect, current: Side) -> [Rect; 2] {
-    let weight = |side| if side == current { 2 } else { 1 };
+/// Split the left column into the side panels: two thirds for Files,
+/// one third for Branches.
+fn side_layout(area: Rect) -> [Rect; 2] {
     let rects = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Fill(weight(Side::Files)),
-            Constraint::Fill(weight(Side::Branches)),
-        ])
+        .constraints([Constraint::Fill(2), Constraint::Fill(1)])
         .split(area);
     [rects[0], rects[1]]
 }
