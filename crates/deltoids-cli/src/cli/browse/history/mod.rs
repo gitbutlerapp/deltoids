@@ -15,7 +15,10 @@
 //! the branch's commits in the same panel, newest first and loaded a page
 //! at a time, and the main view previews the selected commit's diff.
 //! `Esc` steps back up to the branches, keeping the selection. A double
-//! click on a branch or commit does what `Enter` does on it.
+//! click on a branch or commit does what `Enter` does on it. While the
+//! Files panel reviews a commit, the side half shows that commit's
+//! details in place of the list ([`History::show_review`]); the list
+//! keys scroll them.
 //!
 //! The lists are a snapshot; [`History::refresh`] re-reads them and keeps
 //! each selection on the same branch or commit.
@@ -42,9 +45,11 @@ use super::mode::{AppCommand, BackgroundWork, DrawBudget};
 use super::panel::{Panel, panel_title};
 use super::vcs::{Branch, Vcs};
 
+mod commit_info;
 mod cursor;
 mod tree;
 
+use commit_info::CommitInfo;
 use cursor::Cursor;
 use tree::Tree;
 
@@ -142,6 +147,8 @@ pub(super) struct History {
     preview: Option<SnapshotPanel>,
     /// A review `Enter` asked for, until the workspace takes it.
     review_request: Option<Snapshot>,
+    /// The commit the Files panel reviews, shown in place of the list.
+    reviewing: Option<CommitInfo>,
     double_click: DoubleClick,
     /// Seconds since the epoch at the last read; commit ages count from
     /// here.
@@ -171,6 +178,7 @@ impl History {
             commits: None,
             preview: None,
             review_request: None,
+            reviewing: None,
             double_click: DoubleClick::default(),
             now: now(),
             side_rect: Rect::default(),
@@ -293,6 +301,23 @@ impl History {
     /// The review `Enter` asked for since the last call.
     pub(super) fn take_review_request(&mut self) -> Option<Snapshot> {
         self.review_request.take()
+    }
+
+    /// Show the details of `commit`, the one the Files panel reviews, in
+    /// place of the list; `None` brings the list back as it was. The
+    /// same commit again keeps its scroll.
+    pub(super) fn show_review(&mut self, commit: Option<&git::Commit>) {
+        let Some(commit) = commit else {
+            self.reviewing = None;
+            return;
+        };
+        if self
+            .reviewing
+            .as_ref()
+            .is_none_or(|info| info.commit() != commit)
+        {
+            self.reviewing = Some(CommitInfo::new(commit.clone()));
+        }
     }
 
     fn move_list(&mut self, key: KeyCode, height: usize) {
@@ -492,6 +517,10 @@ impl Panel for History {
         theme: &Theme,
     ) {
         self.side_rect = area;
+        if let Some(info) = self.reviewing.as_mut() {
+            info.draw(frame, area, number, focused, self.now, theme);
+            return;
+        }
         match self.screen {
             Screen::Branches => {
                 let color = pane_border_color(focused, theme);
@@ -548,6 +577,13 @@ impl Panel for History {
                 Screen::Branches | Screen::Commits => self.forward_key(key, height),
             };
         }
+        if let Some(info) = self.reviewing.as_mut() {
+            if matches!(key, KeyCode::Char('J' | 'K')) {
+                return self.forward_key(key, height);
+            }
+            info.handle_key(key, height);
+            return AppCommand::Continue;
+        }
         match key {
             KeyCode::Esc => self.screen = Screen::Branches,
             KeyCode::Enter => self.open_selected(),
@@ -575,12 +611,14 @@ impl Panel for History {
         let scroll = |history: &mut Self, key| {
             if in_main {
                 history.scroll_log(key, height);
+            } else if let Some(info) = history.reviewing.as_mut() {
+                info.handle_key(key, height);
             } else {
                 history.move_list(key, height);
             }
         };
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) if !in_main => {
+            MouseEventKind::Down(MouseButton::Left) if !in_main && self.reviewing.is_none() => {
                 if self.click_row(mouse.row).is_some() && double {
                     self.open_selected();
                 }

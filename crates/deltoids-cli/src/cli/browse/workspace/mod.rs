@@ -10,7 +10,9 @@
 //!    `but status`. Main shows the selected branch's log or commit's
 //!    diff. Drills down into a branch's commits (main: the selected
 //!    commit's diff). `Enter` on a commit, or on an applied GitButler
-//!    branch, opens its review in Files.
+//!    branch, opens its review in Files. While Files reviews a commit,
+//!    Branches shows the commit's details, and `Esc` there closes the
+//!    review.
 //!
 //! Focus is on one side panel or on the main view. Files takes two
 //! thirds of the column and Branches one third. `1`/`2` focus a side
@@ -184,9 +186,26 @@ impl Workspace {
             let Some(dir) = self.files.repo_dir() else {
                 return;
             };
-            self.review = Some(SnapshotPanel::review(dir, snapshot));
+            self.set_review(Some(SnapshotPanel::review(dir, snapshot)));
         }
         self.focus(Side::Files, false);
+    }
+
+    /// Show `review` in the Files panel, or the working tree for `None`,
+    /// and tell the branches panel which commit, if any, is under review.
+    fn set_review(&mut self, review: Option<SnapshotPanel>) {
+        self.review = review;
+        let commit = self.review.as_ref().and_then(SnapshotPanel::commit);
+        if let Some(branches) = self.branches.as_mut() {
+            branches.show_review(commit);
+        }
+    }
+
+    /// Whether the branches panel shows the commit under review.
+    fn reviewing_commit(&self) -> bool {
+        self.review
+            .as_ref()
+            .is_some_and(|review| review.commit().is_some())
     }
 
     /// Inner height of the half with focus; `main` is the main view's.
@@ -259,8 +278,12 @@ impl Mode for Workspace {
             }
             KeyCode::Esc if self.main_focused => self.focus(side, false),
             KeyCode::Esc if side == Side::Files && self.review.is_some() => {
-                self.review = None;
+                self.set_review(None);
                 self.focus(Side::Files, false);
+            }
+            KeyCode::Esc if side == Side::Branches && self.reviewing_commit() => {
+                self.set_review(None);
+                self.focus(Side::Branches, false);
             }
             KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right if !self.main_focused => {
                 self.focus(side.step(1), false);

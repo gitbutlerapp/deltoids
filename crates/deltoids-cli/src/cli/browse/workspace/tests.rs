@@ -431,6 +431,116 @@ fn enter_on_a_branch_lists_its_commits_and_enter_reviews_one_in_files() {
     assert!(panel(&mut workspace, '2').contains("Local branches"));
 }
 
+/// [`fixture`] with one more commit on `main` whose message has a
+/// subject and a body, so its review has details to show.
+fn explained_fixture(body: &str) -> tempfile::TempDir {
+    let dir = fixture();
+    let repo = Repository::open(dir.path()).unwrap();
+    let message = format!("explain the change\n\n{body}\n");
+    commit(
+        dir.path(),
+        &repo,
+        &[("greet.rs", "fn greet() {\n    println!(\"Hi\");\n}\n")],
+        &message,
+        400,
+    );
+    dir
+}
+
+fn head_short(dir: &Path) -> String {
+    let repo = Repository::open(dir).unwrap();
+    let id = repo.revparse_single("HEAD").unwrap().id().to_string();
+    id[..7].to_string()
+}
+
+#[test]
+fn reviewing_a_commit_shows_its_details_in_the_branches_panel() {
+    let dir = explained_fixture("The body says why the change matters.");
+    let mut workspace = workspace(dir.path());
+
+    press(
+        &mut workspace,
+        &[KeyCode::Char('2'), KeyCode::Enter, KeyCode::Enter],
+    );
+
+    let details = panel(&mut workspace, '2');
+    assert!(
+        details.contains(&format!("Commit {}", head_short(dir.path()))),
+        "{details}"
+    );
+    assert!(
+        details.contains("Ada Lovelace <ada@example.com>"),
+        "{details}"
+    );
+    assert!(details.contains("explain the change"), "{details}");
+    assert!(!details.contains("shout greeting"), "{details}");
+
+    press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Char('G')]);
+    let details = panel(&mut workspace, '2');
+    assert!(
+        details.contains("The body says why the change"),
+        "{details}"
+    );
+}
+
+#[test]
+fn closing_a_commit_review_brings_back_the_commit_list() {
+    let dir = explained_fixture("Why.");
+    let mut workspace = workspace(dir.path());
+    press(
+        &mut workspace,
+        &[
+            KeyCode::Char('2'),
+            KeyCode::Enter,
+            KeyCode::Char('j'),
+            KeyCode::Enter,
+        ],
+    );
+    press(&mut workspace, &[KeyCode::Esc]);
+
+    let commits = panel(&mut workspace, '2');
+    assert!(commits.contains("Commits (main)"), "{commits}");
+    assert!(commits.contains("shout greeting"), "{commits}");
+    press(&mut workspace, &[KeyCode::Char('2')]);
+    let preview = right_text(&mut workspace);
+    assert!(preview.contains("shout greeting"), "{preview}");
+    assert!(!preview.contains("explain the change"), "{preview}");
+}
+
+#[test]
+fn esc_on_the_commit_details_closes_the_review() {
+    let dir = explained_fixture("Why.");
+    let mut workspace = workspace(dir.path());
+    press(
+        &mut workspace,
+        &[KeyCode::Char('2'), KeyCode::Enter, KeyCode::Enter],
+    );
+
+    press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Esc]);
+
+    let files = panel(&mut workspace, '1');
+    assert!(files.contains("[1]─Files"), "{files}");
+    assert!(panel(&mut workspace, '2').contains("Commits (main)"));
+}
+
+#[test]
+fn a_long_commit_message_scrolls_in_the_branches_panel() {
+    let body: Vec<String> = (1..=12).map(|n| format!("note {n:02}")).collect();
+    let dir = explained_fixture(&body.join("\n"));
+    let mut workspace = workspace(dir.path());
+    press(
+        &mut workspace,
+        &[KeyCode::Char('2'), KeyCode::Enter, KeyCode::Enter],
+    );
+    assert!(!panel(&mut workspace, '2').contains("note 12"));
+
+    press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Char('G')]);
+
+    let details = panel(&mut workspace, '2');
+    assert!(details.contains("note 12"), "{details}");
+    assert!(!details.contains("explain the change"), "{details}");
+}
+
 fn feature_tip(dir: &Path) -> String {
     let repo = Repository::open(dir).unwrap();
     let id = repo.revparse_single("feature").unwrap().id().to_string();
@@ -766,7 +876,12 @@ fn a_commit_row_previews_its_diff_and_enter_reviews_it_in_files() {
     assert!(files.contains("feature.rs"), "{files}");
     assert!(!files.contains("greet.rs"), "{files}");
     assert_eq!(focused_panel(&mut workspace), Some('1'));
-    assert!(panel(&mut workspace, '2').contains("abcd add feature"));
+    let details = panel(&mut workspace, '2');
+    assert!(
+        details.contains("Ada Lovelace <ada@example.com>"),
+        "{details}"
+    );
+    assert!(!details.contains("abcd add feature"), "{details}");
     assert!(right_text(&mut workspace).contains("fn feature()"));
 
     press(&mut workspace, &[KeyCode::Esc]);
@@ -811,6 +926,7 @@ fn double_clicking_a_workspace_branch_reviews_it_in_files() {
     assert!(files.contains("Review feature"), "{files}");
     assert!(files.contains("feature.rs"), "{files}");
     assert_eq!(focused_panel(&mut workspace), Some('1'));
+    assert!(panel(&mut workspace, '2').contains("[feature]"));
 }
 
 /// Commit `files` on top of `branch` without touching the working tree,

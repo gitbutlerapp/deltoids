@@ -128,6 +128,14 @@ impl SnapshotPanel {
         &self.snapshot == snapshot
     }
 
+    /// The commit this panel shows; `None` for a branch.
+    pub(in crate::cli::browse) fn commit(&self) -> Option<&git::Commit> {
+        match &self.snapshot {
+            Snapshot::Commit(commit) => Some(commit),
+            Snapshot::Branch { .. } => None,
+        }
+    }
+
     /// Show the whole snapshot, as `git show` does: a commit's header
     /// above every file's diff. Off, the diff follows the file tree.
     pub(in crate::cli::browse) fn show_whole(&mut self, whole: bool) {

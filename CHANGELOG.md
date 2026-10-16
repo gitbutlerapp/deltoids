@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- TUI: while you review a commit, the Branches panel shows its id, age, author, and full message. `Esc` there closes the review.
 - TUI: click a directory's arrow in the Files panel to fold or unfold it.
 - TUI: double-click a branch or commit in the Branches panel to open it, as `Enter` does.
 
