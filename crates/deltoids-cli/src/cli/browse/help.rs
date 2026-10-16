@@ -41,6 +41,7 @@ pub(super) const HELP_KEYS: &[(&str, &str)] = &[
     ("a", "stage / unstage all files (sidebar)"),
     ("Enter", "fold / unfold directory (sidebar)"),
     ("f", "hide / show tests, comments, imports, lockfiles"),
+    ("F", "hide / show test, comment, import hunks"),
     ("s", "switch staged / unstaged diff"),
     ("d", "discard (sidebar) / delete comment (diff)"),
     ("y", "copy comments"),

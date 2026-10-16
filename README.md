@@ -135,7 +135,8 @@ critical; straightforward changes get no dot. A tag ends in `!`, as in conventio
 commits, when the change breaks code or users outside its package. A
 file shows its hunk that needs the most attention. The names of tests, code comments, import-only changes, and
 lockfiles are muted; press `f` to hide them. Each hunk header shows its
-own tag and dot.
+own tag and dot. Press `F` to collapse test, comment, and import hunks
+inside the diff to one line each.
 
 Set `TYPESAFE_API_KEY` to let TypeSafe's Jev model judge each change
 when the TUI opens. Every changed file goes to Jev except package

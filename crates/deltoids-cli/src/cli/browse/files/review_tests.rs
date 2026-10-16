@@ -194,6 +194,124 @@ fn f_hides_nothing_without_jev() {
     assert_eq!(sidebar_paths(&state), all);
 }
 
+/// `src/a.txt` with an import hunk near the top and a core hunk near
+/// the bottom, judged by a Jev that calls `use` lines imports.
+fn import_and_core_hunks() -> FilesMode {
+    let before: String = (1..=40).map(|n| format!("line {n}\n")).collect();
+    let after = before
+        .replace("line 2\n", "use b;\n")
+        .replace("line 35\n", "core change\n");
+    let file = ResolvedFile {
+        file: file_diff("src/a.txt"),
+        before,
+        after,
+    };
+    let jev: review::Sender = std::sync::Arc::new(|request: &crate::judgments::JevRequest| {
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        let mut answers = serde_json::Map::new();
+        for (id, hunk) in body["state"]["hunks"].as_object().unwrap() {
+            let diff = hunk["diff"].as_str().unwrap();
+            let (role, attention) = if diff.contains("+use ") {
+                ("imports", 0.0)
+            } else {
+                ("core", 1.0)
+            };
+            answers.insert(
+                format!("role_{id}"),
+                serde_json::json!({ "choice": role, "confidence": 0.9 }),
+            );
+            answers.insert(
+                format!("attention_{id}"),
+                serde_json::json!({ "score": attention }),
+            );
+            answers.insert(format!("breaking_{id}"), serde_json::json!({ "noul": 0.0 }));
+        }
+        Ok(serde_json::json!({ "answers": answers }).to_string())
+    });
+    let mut state = with_jev(&[file], jev);
+    wait_for_review(&mut state);
+    state
+}
+
+fn diff_texts(state: &mut FilesMode) -> Vec<String> {
+    state
+        .visible_diff_window(DrawBudget::Full)
+        .iter()
+        .map(line_text)
+        .collect()
+}
+
+#[test]
+fn shift_f_collapses_low_value_hunks_and_brings_them_back() {
+    let mut state = import_and_core_hunks();
+    let all = diff_texts(&mut state);
+    assert!(all.iter().any(|text| text.contains("use b;")), "{all:#?}");
+
+    Mode::handle_key(&mut state, KeyCode::Char('F'), 20);
+    let hidden = diff_texts(&mut state);
+    assert!(
+        !hidden.iter().any(|text| text.contains("use b;")),
+        "{hidden:#?}"
+    );
+    assert!(
+        hidden.contains(&"imports hunk hidden".to_string()),
+        "{hidden:#?}"
+    );
+    assert!(
+        hidden.iter().any(|text| text.contains("core change")),
+        "{hidden:#?}"
+    );
+
+    Mode::handle_key(&mut state, KeyCode::Char('F'), 20);
+    assert_eq!(diff_texts(&mut state), all);
+}
+
+#[test]
+fn shift_f_and_f_hide_independently() {
+    let mut state = import_and_core_hunks();
+
+    Mode::handle_key(&mut state, KeyCode::Char('F'), 20);
+    Mode::handle_key(&mut state, KeyCode::Char('f'), 20);
+    assert_eq!(sidebar_paths(&state), ["src/a.txt"]);
+    let hidden = diff_texts(&mut state);
+    assert!(
+        hidden.contains(&"imports hunk hidden".to_string()),
+        "{hidden:#?}"
+    );
+
+    Mode::handle_key(&mut state, KeyCode::Char('f'), 20);
+    assert_eq!(diff_texts(&mut state), hidden);
+}
+
+#[test]
+fn shift_f_hides_nothing_without_jev() {
+    let mut state = four_files();
+    let all = diff_texts(&mut state);
+
+    Mode::handle_key(&mut state, KeyCode::Char('F'), 20);
+
+    assert_eq!(diff_texts(&mut state), all);
+}
+
+#[test]
+fn hiding_the_hunk_under_the_cursor_moves_the_cursor_to_a_shown_line() {
+    let mut state = import_and_core_hunks();
+    diff_texts(&mut state);
+    let row = state
+        .unstaged
+        .rows()
+        .iter()
+        .position(|row| row.place.as_ref().is_some_and(|place| place.hunk == 0))
+        .unwrap();
+    state.unstaged.select_row(row);
+
+    Mode::handle_key(&mut state, KeyCode::Char('F'), 20);
+    diff_texts(&mut state);
+
+    let (place, _) = state.unstaged.cursor_line().unwrap();
+    assert_eq!(place.hunk, 1);
+}
+
 fn hunk_header_texts(state: &mut FilesMode) -> Vec<String> {
     state
         .visible_diff_window(DrawBudget::Full)

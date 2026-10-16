@@ -182,6 +182,8 @@ pub(super) struct FilesMode {
     review: review::Review,
     guidance: review::Guidance,
     hide_low: bool,
+    /// Collapse hunks Jev judged low value in the diff.
+    hide_low_hunks: bool,
     /// Sidebar title: "Files" for the working tree, the commit otherwise.
     label: String,
     /// A commit snapshot: no staging or discard actions.
@@ -265,6 +267,7 @@ impl FilesMode {
             &HunkLabels {
                 revision: self.review.revision(),
                 lookup: &lookup,
+                hide_low: self.hide_low_hunks,
             },
         );
         pane.render(frame, right, focused, theme, self.status.as_deref());
@@ -356,6 +359,7 @@ impl FilesMode {
             review: review::Review::default(),
             guidance: review::Guidance::default(),
             hide_low: false,
+            hide_low_hunks: false,
             label: "Files".to_string(),
             read_only: false,
             commit: None,
@@ -541,6 +545,7 @@ impl FilesMode {
             &HunkLabels {
                 revision: self.review.revision(),
                 lookup: &lookup,
+                hide_low: self.hide_low_hunks,
             },
         );
     }
@@ -805,6 +810,10 @@ fn handle_key(state: &mut FilesMode, key: KeyCode, height: usize) -> AppCommand 
     }
     if key == KeyCode::Char('f') {
         state.toggle_hidden(height);
+        return AppCommand::Continue;
+    }
+    if key == KeyCode::Char('F') {
+        state.hide_low_hunks = !state.hide_low_hunks;
         return AppCommand::Continue;
     }
     if state.focus == Focus::Sidebar && key == KeyCode::Char('a') && !state.read_only {
@@ -1207,7 +1216,7 @@ impl Mode for FilesMode {
     }
 
     fn reserves_key(&self, key: KeyCode) -> bool {
-        key == KeyCode::Char('f')
+        matches!(key, KeyCode::Char('f' | 'F'))
             || !self.read_only
                 && self.focus == Focus::Sidebar
                 && matches!(key, KeyCode::Char(' ' | 'd' | 'a'))

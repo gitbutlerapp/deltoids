@@ -454,6 +454,46 @@ fn label_hunks(
     }
 }
 
+/// Replace each hunk labelled low value, from its line-number box up to
+/// the next hunk's separator, with one muted row naming its tag.
+fn hide_low_hunks(
+    rows: Vec<DiffRow>,
+    theme: &Theme,
+    label: impl Fn(usize) -> Option<RowNote>,
+) -> Vec<DiffRow> {
+    let starts: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].hunk_start).collect();
+    let mut hidden: Vec<(usize, usize, &'static str)> = Vec::new();
+    for (hunk, &start) in starts.iter().enumerate() {
+        let Some(note) = label(hunk).filter(|note| note.low) else {
+            continue;
+        };
+        let end = starts.get(hunk + 1).map_or(rows.len(), |next| next - 1);
+        hidden.push((start, end, note.tag));
+    }
+    if hidden.is_empty() {
+        return rows;
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    let mut ranges = hidden.into_iter().peekable();
+    let mut skip_until = 0;
+    for (i, row) in rows.into_iter().enumerate() {
+        if let Some(&(start, end, tag)) = ranges.peek()
+            && i == start
+        {
+            ranges.next();
+            skip_until = end;
+            out.push(DiffRow::plain(Line::from(Span::styled(
+                format!("{tag} hunk hidden"),
+                Style::default().fg(rgb_to_color(theme.muted)),
+            ))));
+        }
+        if i >= skip_until {
+            out.push(row);
+        }
+    }
+    out
+}
+
 fn line_ends_with(line: &Line<'_>, end: char) -> bool {
     line.spans
         .last()
@@ -525,12 +565,15 @@ struct WindowKey {
     blocks: u64,
     comments: u64,
     labels: u64,
+    hide_low: bool,
 }
 
-/// `revision` changes whenever `lookup` may answer differently.
+/// `revision` changes whenever `lookup` may answer differently. With
+/// `hide_low`, hunks whose label is low value collapse to one muted row.
 pub(super) struct HunkLabels<'a> {
     pub(super) revision: u64,
     pub(super) lookup: &'a dyn Fn(usize, usize) -> Option<RowNote>,
+    pub(super) hide_low: bool,
 }
 
 #[cfg(test)]
@@ -538,6 +581,7 @@ impl HunkLabels<'_> {
     pub(super) const NONE: HunkLabels<'static> = HunkLabels {
         revision: 0,
         lookup: &|_, _| None,
+        hide_low: false,
     };
 }
 
@@ -691,6 +735,7 @@ impl DiffPane {
             blocks: self.cache.revision,
             comments: comments.revision(),
             labels: labels.revision,
+            hide_low: labels.hide_low,
         };
         let same_selection = self
             .window_key
@@ -857,9 +902,11 @@ impl DiffPane {
                     .line(anchor)
                     .is_some_and(|(content, _)| content != comment.code)
             });
-            label_hunks(&mut rows, epoch.width, theme, |hunk| {
-                (labels.lookup)(input_idx, hunk)
-            });
+            let label = |hunk| (labels.lookup)(input_idx, hunk);
+            label_hunks(&mut rows, epoch.width, theme, label);
+            if labels.hide_low {
+                rows = hide_low_hunks(rows, theme, label);
+            }
             rows
         } else {
             let view = model.view(input_idx, self.column);
