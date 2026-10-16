@@ -261,6 +261,14 @@ fn shift_f_collapses_low_value_hunks_and_brings_them_back() {
         hidden.iter().any(|text| text.contains("core change")),
         "{hidden:#?}"
     );
+    let marker = hidden
+        .iter()
+        .position(|text| text == "imports hunk hidden")
+        .unwrap();
+    assert!(
+        hidden[marker - 2].starts_with("1 │") && hidden[marker - 2].ends_with("imports  "),
+        "{hidden:#?}"
+    );
 
     Mode::handle_key(&mut state, KeyCode::Char('F'), 20);
     assert_eq!(diff_texts(&mut state), all);

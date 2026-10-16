@@ -454,8 +454,9 @@ fn label_hunks(
     }
 }
 
-/// Replace each hunk labelled low value, from its line-number box up to
-/// the next hunk's separator, with one muted row naming its tag.
+/// Collapse each hunk labelled low value to its line-number box, which
+/// shows where it starts and its tag, plus one muted row saying it is
+/// hidden. The body up to the next hunk's separator is left out.
 fn hide_low_hunks(
     rows: Vec<DiffRow>,
     theme: &Theme,
@@ -468,7 +469,10 @@ fn hide_low_hunks(
             continue;
         };
         let end = starts.get(hunk + 1).map_or(rows.len(), |next| next - 1);
-        hidden.push((start, end, note.tag));
+        let body = (start + 1..end)
+            .find(|&i| line_ends_with(&rows[i].line, '╯'))
+            .map_or(start, |bottom| bottom + 1);
+        hidden.push((body, end, note.tag));
     }
     if hidden.is_empty() {
         return rows;
