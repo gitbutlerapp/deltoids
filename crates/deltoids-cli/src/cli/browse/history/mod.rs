@@ -18,7 +18,8 @@
 //! opens the commit in the panel as a read-only [`SnapshotPanel`]: its file
 //! tree in the panel and its diff in the main view, with every diff-pane
 //! feature (cursor, comments, hunk reshaping) but no staging. `Esc` steps
-//! back up to the branches; each step keeps its selection.
+//! back up to the branches; each step keeps its selection. A double
+//! click on a branch or commit does what `Enter` does on it.
 //!
 //! The lists are a snapshot; [`History::refresh`] re-reads them and keeps
 //! each selection on the same branch or commit.
@@ -39,6 +40,7 @@ use deltoids::render_tui::{
 };
 use deltoids::{ChangeLayout, Theme, git};
 
+use super::double_click::DoubleClick;
 use super::files::{Snapshot, SnapshotPanel};
 use super::mode::{AppCommand, BackgroundWork, DrawBudget};
 use super::panel::{Panel, panel_title};
@@ -146,6 +148,7 @@ pub(super) struct History {
     preview: Option<SnapshotPanel>,
     /// A review `Enter` asked for, until the workspace takes it.
     review_request: Option<Snapshot>,
+    double_click: DoubleClick,
     /// Seconds since the epoch at the last read; commit ages count from
     /// here.
     now: i64,
@@ -174,6 +177,7 @@ impl History {
             commits: None,
             preview: None,
             review_request: None,
+            double_click: DoubleClick::default(),
             now: now(),
             side_rect: Rect::default(),
             main_rect: Rect::default(),
@@ -292,6 +296,22 @@ impl History {
             self.review_request = Snapshot::of_branch(branch);
         } else {
             self.open_branch_commits();
+        }
+    }
+
+    /// `Enter` on the selected row: a commit on the branches screen asks
+    /// for its review, a branch opens ([`Self::open_branch`]), and a
+    /// commit in a commit list opens in the panel.
+    fn open_selected(&mut self) {
+        match self.screen {
+            Screen::Branches if self.tree_commit().is_some() => {
+                self.review_request = self.tree_commit().cloned().map(Snapshot::Commit);
+            }
+            Screen::Branches => self.open_branch(),
+            Screen::Commits if self.selected_commit().is_some() => {
+                self.set_screen(Screen::Commit);
+            }
+            Screen::Commits | Screen::Commit => {}
         }
     }
 
@@ -453,38 +473,40 @@ impl History {
         frame.render_widget(Paragraph::new(text).style(muted).block(block), area);
     }
 
-    /// Select the list row under a click in the side panel.
-    fn click_row(&mut self, row: u16) {
+    /// Select the list row under a click in the side panel. Returns the
+    /// row it selected, or `None` when the click hit nothing selectable.
+    fn click_row(&mut self, row: u16) -> Option<usize> {
         let inner = self.side_rect.inner(Margin {
             vertical: 1,
             horizontal: 1,
         });
         if row < inner.y || row >= inner.bottom() {
-            return;
+            return None;
         }
         let offset = (row - inner.y) as usize;
         match self.screen {
             Screen::Branches => {
                 let len = self.branch_count();
                 let before = self.branch_cursor.selected;
-                self.branch_cursor.click(offset, len);
-                if !self
+                let hit = self.branch_cursor.click(offset, len);
+                self.log_scroll = 0;
+                let selectable = self
                     .tree
                     .as_ref()
-                    .is_ok_and(|tree| tree.is_selectable(self.branch_cursor.selected))
-                {
+                    .is_ok_and(|tree| tree.is_selectable(self.branch_cursor.selected));
+                if !selectable {
                     self.branch_cursor.selected = before;
                 }
-                self.log_scroll = 0;
+                hit.filter(|_| selectable)
             }
             Screen::Commits => {
-                if let Some(list) = self.commits.as_mut() {
-                    let len = list.len();
-                    list.cursor.click(offset, len);
-                    list.load_more(&self.vcs);
-                }
+                let list = self.commits.as_mut()?;
+                let len = list.len();
+                let hit = list.cursor.click(offset, len);
+                list.load_more(&self.vcs);
+                hit
             }
-            Screen::Commit => {}
+            Screen::Commit => None,
         }
     }
 
@@ -572,13 +594,7 @@ impl Panel for History {
         }
         match (self.screen, key) {
             (_, KeyCode::Esc) => self.step_back(),
-            (Screen::Branches, KeyCode::Enter) if self.tree_commit().is_some() => {
-                self.review_request = self.tree_commit().cloned().map(Snapshot::Commit);
-            }
-            (Screen::Branches, KeyCode::Enter) => self.open_branch(),
-            (Screen::Commits, KeyCode::Enter) if self.selected_commit().is_some() => {
-                self.set_screen(Screen::Commit);
-            }
+            (Screen::Branches | Screen::Commits, KeyCode::Enter) => self.open_selected(),
             // Shift+J/K scroll the preview, as they scroll the diff from
             // the Files panel.
             (Screen::Branches | Screen::Commits, KeyCode::Char('J' | 'K')) => {
@@ -599,6 +615,7 @@ impl Panel for History {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, height: usize) -> AppCommand {
+        let double = self.double_click.press(&mouse);
         let position = Position::new(mouse.column, mouse.row);
         let in_main = self.main_rect.contains(position);
         let to_commit = match self.screen {
@@ -619,7 +636,11 @@ impl Panel for History {
             }
         };
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) if !in_main => self.click_row(mouse.row),
+            MouseEventKind::Down(MouseButton::Left) if !in_main => {
+                if self.click_row(mouse.row).is_some() && double {
+                    self.open_selected();
+                }
+            }
             MouseEventKind::ScrollDown => scroll(self, KeyCode::Down),
             MouseEventKind::ScrollUp => scroll(self, KeyCode::Up),
             _ => {}

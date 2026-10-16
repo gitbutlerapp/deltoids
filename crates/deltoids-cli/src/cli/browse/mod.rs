@@ -51,6 +51,7 @@ mod comment_view;
 mod comments;
 mod diff_cursor;
 mod diff_scrollbar;
+mod double_click;
 mod events;
 mod files;
 mod help;

@@ -29,12 +29,14 @@ impl Cursor {
         .min(last);
     }
 
-    /// Select the row `offset` rows below the top of the pane, if any.
-    pub(super) fn click(&mut self, offset: usize, len: usize) {
+    /// Select the row `offset` rows below the top of the pane, if any,
+    /// and return it.
+    pub(super) fn click(&mut self, offset: usize, len: usize) -> Option<usize> {
         let index = self.scroll + offset;
-        if index < len {
+        (index < len).then(|| {
             self.selected = index;
-        }
+            index
+        })
     }
 
     /// The rows on screen in a pane `height` rows tall, scrolled just

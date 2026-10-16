@@ -458,6 +458,47 @@ fn clicking_a_panel_row_focuses_the_panel_and_selects_the_row() {
     assert!(right_text(&mut workspace).contains("add feature"));
 }
 
+/// The screen row of the left column that contains `text`.
+fn row_of(workspace: &mut Workspace, text: &str) -> u16 {
+    let rows = left_rows(workspace);
+    rows.iter()
+        .position(|row| row.contains(text))
+        .unwrap_or_else(|| panic!("no {text:?} on screen:\n{}", rows.join("\n"))) as u16
+}
+
+#[test]
+fn double_clicking_a_commit_opens_it_like_enter() {
+    let dir = fixture();
+    let mut workspace = workspace(dir.path());
+    press(
+        &mut workspace,
+        &[KeyCode::Char('2'), KeyCode::Char('j'), KeyCode::Enter],
+    );
+    let commit = row_of(&mut workspace, "add feature");
+
+    click(&mut workspace, 5, commit);
+    assert!(panel(&mut workspace, '2').contains("Commits (feature)"));
+    click(&mut workspace, 5, commit);
+
+    let files = panel(&mut workspace, '2');
+    let short = feature_tip(dir.path());
+    assert!(files.contains(&format!("Commit {short}")), "{files}");
+    assert!(files.contains("feature.rs"), "{files}");
+}
+
+#[test]
+fn double_clicking_a_branch_lists_its_commits() {
+    let dir = fixture();
+    let mut workspace = workspace(dir.path());
+    let branch = row_of(&mut workspace, "  feature");
+
+    click(&mut workspace, 5, branch);
+    click(&mut workspace, 5, branch);
+
+    let commits = panel(&mut workspace, '2');
+    assert!(commits.contains("Commits (feature)"), "{commits}");
+}
+
 #[test]
 fn a_comment_editor_takes_digits_and_tab_as_text() {
     let dir = fixture();
@@ -720,6 +761,44 @@ fn a_commit_row_previews_its_diff_and_enter_reviews_it_in_files() {
     let files = panel(&mut workspace, '1');
     assert!(files.contains("[1]─Files"), "{files}");
     assert!(files.contains("greet.rs"), "{files}");
+}
+
+#[cfg(unix)]
+#[test]
+fn double_clicking_a_workspace_commit_reviews_it_in_files() {
+    let dir = fixture();
+    enter_gitbutler(dir.path());
+    let stubs = tempfile::tempdir().unwrap();
+    let status = feature_status(dir.path());
+    let mut workspace = gitbutler_workspace(dir.path(), stubs.path(), &status);
+    let commit = row_of(&mut workspace, "abcd add feature");
+
+    click(&mut workspace, 5, commit);
+    assert!(panel(&mut workspace, '1').contains("[1]─Files"));
+    click(&mut workspace, 5, commit);
+
+    let files = panel(&mut workspace, '1');
+    assert!(files.contains("Commit "), "{files}");
+    assert!(files.contains("feature.rs"), "{files}");
+    assert!(!files.contains("greet.rs"), "{files}");
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
+}
+
+#[cfg(unix)]
+#[test]
+fn double_clicking_a_workspace_branch_reviews_it_in_files() {
+    let dir = fixture();
+    let stubs = tempfile::tempdir().unwrap();
+    let mut workspace = stacked_workspace(dir.path(), stubs.path());
+    let branch = row_of(&mut workspace, "[feature]");
+
+    click(&mut workspace, 5, branch);
+    click(&mut workspace, 5, branch);
+
+    let files = panel(&mut workspace, '1');
+    assert!(files.contains("Review feature"), "{files}");
+    assert!(files.contains("feature.rs"), "{files}");
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
 }
 
 /// Commit `files` on top of `branch` without touching the working tree,

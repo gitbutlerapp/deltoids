@@ -322,9 +322,13 @@ impl Mode for Workspace {
         } else {
             return AppCommand::Continue;
         };
-        self.panel(side).map_or(AppCommand::Continue, |panel| {
+        let command = self.panel(side).map_or(AppCommand::Continue, |panel| {
             panel.handle_mouse(mouse, panel_height)
-        })
+        });
+        if side == Side::Branches {
+            self.open_review();
+        }
+        command
     }
 
     fn watch(&mut self) -> Result<Option<ChangeReceiver>, String> {
