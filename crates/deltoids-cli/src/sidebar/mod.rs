@@ -12,7 +12,8 @@
 //!   [`Sidebar::bottom`] / [`Sidebar::page_up`] / [`Sidebar::page_down`]
 //!   — navigation over visible rows (files and directories).
 //! - [`Sidebar::toggle_selected_dir`] — fold or unfold the selected
-//!   directory; [`Sidebar::folds`] / [`Sidebar::apply_folds`] carry
+//!   directory; [`Sidebar::click`] selects a row and folds or unfolds
+//!   a directory clicked on its arrow; [`Sidebar::folds`] / [`Sidebar::apply_folds`] carry
 //!   folds into a rebuilt sidebar.
 //! - [`Sidebar::scroll`] — current scroll offset (auto-tracked to keep
 //!   selection visible).
@@ -52,7 +53,7 @@ pub use status::{
     display_path, file_metadata, file_status, is_binary_marker,
 };
 
-use render::{copy_origin, rename_leaf, render_row};
+use render::{arrow_columns, copy_origin, rename_leaf, render_row};
 use tree::{Row, build_rows};
 
 /// Aggregate statistics about the resolved file set, summarised for
@@ -363,6 +364,22 @@ impl Sidebar {
             self.folds.0.insert(path);
         }
         self.refold(row, viewport);
+        true
+    }
+
+    /// Select the visible row at `position`, and fold or unfold it when
+    /// it is a directory and `column` (counted from the row's first cell)
+    /// falls on its arrow. Returns `false` when no row is there.
+    pub fn click(&mut self, position: usize, column: usize, viewport: usize) -> bool {
+        let Some(&row) = self.visible.get(position) else {
+            return false;
+        };
+        self.set_selected(position, viewport);
+        if let Row::Dir { depth, .. } = &self.rows[row]
+            && arrow_columns(*depth).contains(&column)
+        {
+            self.toggle_selected_dir(viewport);
+        }
         true
     }
 
@@ -1117,6 +1134,43 @@ mod tests {
         assert!(sidebar.toggle_selected_dir(20));
         assert_eq!(sidebar.row_count(), 4);
         assert_eq!(line_text(&sidebar.rows()[0]), "▼ src/");
+    }
+
+    #[test]
+    fn clicking_a_directory_arrow_folds_and_unfolds_it() {
+        let diffs = [fd("src/a.rs"), fd("src/lib/b.rs"), fd("src/lib/c.rs")];
+        let files = plain_files(&diffs);
+        let mut sidebar = Sidebar::build_with_icons(&files, &theme(), IconMode::Off);
+        assert_eq!(texts(&sidebar)[2], "  ▼ lib/");
+
+        assert!(sidebar.click(2, 3, 20));
+        assert_eq!(texts(&sidebar), ["▼ src/", "  M a.rs", "  ▶ lib/"]);
+
+        assert!(sidebar.click(0, 0, 20));
+        assert_eq!(texts(&sidebar), ["▶ src/"]);
+        assert!(sidebar.click(0, 1, 20));
+        assert_eq!(texts(&sidebar), ["▼ src/", "  M a.rs", "  ▶ lib/"]);
+    }
+
+    #[test]
+    fn clicking_off_the_arrow_only_selects_the_row() {
+        let diffs = [fd("src/lib/b.rs"), fd("src/a.rs")];
+        let files = plain_files(&diffs);
+        let mut sidebar = Sidebar::build_with_icons(&files, &theme(), IconMode::Off);
+        let rows = sidebar.row_count();
+
+        assert!(sidebar.click(1, 1, 20));
+        assert_eq!(sidebar.selected(), 1);
+        assert_eq!(sidebar.row_count(), rows);
+        assert!(sidebar.click(0, 2, 20));
+        assert_eq!(sidebar.selected(), 0);
+        assert_eq!(sidebar.row_count(), rows);
+        let file = sidebar.row_count() - 1;
+        assert!(sidebar.click(file, 2, 20));
+        assert_eq!(sidebar.selected(), file);
+        assert_eq!(sidebar.row_count(), rows);
+        assert!(!sidebar.click(rows, 0, 20));
+        assert_eq!(sidebar.selected(), file);
     }
 
     #[test]

@@ -2,11 +2,14 @@
 //! styled [`Line`], including status badges, icons, delta counts, and the
 //! trailing binary/mode/submodule badges.
 
+use std::ops::Range;
+
 use deltoids::Theme;
 use deltoids::parse::FileDiff;
 use deltoids::render_tui::rgb_to_color;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use super::icons::{IconMode, dir_icon, file_icon};
 use super::status::{FileMode, FileStatus, ModeChange};
@@ -102,7 +105,7 @@ fn dir_row_spans(
     base: Style,
 ) {
     spans.push(Span::styled(indent(depth), base));
-    let arrow = if folded { "▶ " } else { "▼ " };
+    let arrow = if folded { FOLDED_ARROW } else { UNFOLDED_ARROW };
     spans.push(Span::styled(arrow, base));
     if icons == IconMode::On {
         // Look the icon up by the deepest segment of the label (strip the
@@ -297,8 +300,18 @@ fn file_row_spans(
     }
 }
 
+const INDENT: &str = "  ";
+const FOLDED_ARROW: &str = "▶ ";
+const UNFOLDED_ARROW: &str = "▼ ";
+
 fn indent(depth: usize) -> String {
-    "  ".repeat(depth)
+    INDENT.repeat(depth)
+}
+
+/// The columns a directory row at `depth` draws its fold arrow in.
+pub(super) fn arrow_columns(depth: usize) -> Range<usize> {
+    let start = INDENT.width() * depth;
+    start..start + UNFOLDED_ARROW.width()
 }
 
 /// Which porcelain column a stage character belongs to. The column

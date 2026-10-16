@@ -503,4 +503,23 @@ mod tests {
         assert_eq!(state.sidebar.selected(), target_row,);
         assert_eq!(state.focus, Focus::Sidebar);
     }
+
+    #[test]
+    fn click_on_a_directory_arrow_folds_it() {
+        let resolved: Vec<_> = ["src/a.txt", "src/b.txt"]
+            .into_iter()
+            .map(|path| ResolvedFile {
+                file: file_diff(path),
+                before: "1\n".to_string(),
+                after: "2\n".to_string(),
+            })
+            .collect();
+        let mut state = make_state_with_rects(&resolved);
+        assert_eq!(state.sidebar.row_count(), 3);
+
+        let arrow = make_mouse(MouseEventKind::Down(MouseButton::Left), 1, 1);
+        handle_mouse(&mut state, arrow, 18);
+        assert_eq!(state.sidebar.row_count(), 1);
+        assert_eq!(state.focus, Focus::Sidebar);
+    }
 }

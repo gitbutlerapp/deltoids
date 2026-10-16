@@ -25,6 +25,7 @@ pub(super) const HELP_KEYS: &[(&str, &str)] = &[
     ("h / l", "previous / next side panel"),
     ("Enter", "focus a file's diff / open branch, commit"),
     ("Double-click", "open a branch or commit, like Enter"),
+    ("Click ▶ / ▼", "fold / unfold a directory"),
     ("Esc", "leave main view / back out / close review"),
     ("Tab (main view)", "switch staged / unstaged diff"),
     ("j / k", "move (list, or between diff lines)"),

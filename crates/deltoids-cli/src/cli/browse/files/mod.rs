@@ -1154,9 +1154,9 @@ fn handle_mouse(state: &mut FilesMode, mouse: MouseEvent, height: usize) -> AppC
                 Focus::Sidebar => {
                     let rect = state.sidebar_rect;
                     let content_y = mouse.row.saturating_sub(rect.y).saturating_sub(1) as usize;
+                    let content_x = mouse.column.saturating_sub(rect.x).saturating_sub(1) as usize;
                     let clicked = state.sidebar.scroll() + content_y;
-                    if clicked < state.sidebar.row_count() {
-                        state.sidebar.set_selected(clicked, height);
+                    if state.sidebar.click(clicked, content_x, height) {
                         state.snap_diff_to_selected_file();
                     }
                 }
