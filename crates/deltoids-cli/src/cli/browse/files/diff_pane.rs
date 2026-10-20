@@ -696,6 +696,11 @@ impl DiffPane {
         self.empty_state = EmptyPane::Loading;
     }
 
+    /// Whether the no-files render shows a build error.
+    pub(super) fn shows_error(&self) -> bool {
+        matches!(self.empty_state, EmptyPane::Error(_))
+    }
+
     /// Reset the no-files render to the clean "No local changes." state
     /// (used once a startup that was Loading resolves to a stable tree).
     pub(super) fn clear_empty_state(&mut self) {

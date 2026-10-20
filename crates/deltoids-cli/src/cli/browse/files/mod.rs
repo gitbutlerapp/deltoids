@@ -289,6 +289,12 @@ impl FilesMode {
         Some(repo.workdir().unwrap_or(repo.git_dir()).to_path_buf())
     }
 
+    /// Whether there is nothing to show: no changes, no repository, and
+    /// neither a startup still loading nor a build error.
+    pub(super) fn is_clean(&self) -> bool {
+        self.model.files.is_empty() && !self.startup_pending && !self.unstaged.shows_error()
+    }
+
     /// Compute the working-tree diff and its model, or an error when the
     /// diff read or model build loses a race with on-disk churn.
     fn try_model(vcs: &Vcs) -> Result<(Patches, Model), String> {
@@ -2533,6 +2539,17 @@ mod tests {
         assert!(mode.reload(reload_vp(), &theme).unwrap());
         assert!(!mode.startup_pending);
         assert!(!mode.retry_reload());
+    }
+
+    #[test]
+    fn loading_and_build_errors_are_never_clean() {
+        let theme = Theme::default();
+        assert!(FilesMode::empty(&theme, 80).is_clean());
+        assert!(!FilesMode::error(&theme, 80, "boom".into()).is_clean());
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let vcs = Vcs::discover_at(dir.path()).unwrap();
+        assert!(!FilesMode::loading(vcs, &theme, 80).is_clean());
     }
 
     #[test]

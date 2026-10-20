@@ -14,6 +14,11 @@
 //!    Branches stays on the reviewed row, and `Esc` there closes the
 //!    review.
 //!
+//! Files shows only while the working tree has changes (or is still
+//! loading, or failed to build) or a review is open; otherwise Branches
+//! fills the column and keeps focus. Panel numbers stay fixed, so `1`
+//! does nothing while Files is hidden.
+//!
 //! Focus is on one side panel or on the main view. Files takes two
 //! thirds of the column and Branches one third. `1`/`2` focus a side
 //! panel and `0` the main view; `Tab`/`Shift+Tab`, `h`/`l`, and the
@@ -109,6 +114,7 @@ impl Workspace {
             but,
         };
         workspace.open_repository();
+        workspace.settle_focus();
         workspace
     }
 
@@ -147,8 +153,26 @@ impl Workspace {
         }
     }
 
-    /// Give `side` focus, on its side panel or its main view.
+    fn shows(&self, side: Side) -> bool {
+        side != Side::Files || self.review.is_some() || !self.files.is_clean()
+    }
+
+    /// Replace the startup placeholder with the built working tree and
+    /// open on Files, or on Branches when the tree is clean.
+    fn adopt_files(&mut self, files: FilesMode) {
+        self.files = files;
+        self.open_repository();
+        self.focus(Side::Files, false);
+    }
+
+    /// Give `side` focus, on its side panel or its main view. A hidden
+    /// panel hands focus to the Branches side panel.
     fn focus(&mut self, side: Side, main: bool) {
+        let (side, main) = if self.shows(side) {
+            (side, main)
+        } else {
+            (Side::Branches, false)
+        };
         self.side = side;
         self.main_focused = main;
         if let Some(panel) = self.panel(side) {
@@ -199,6 +223,14 @@ impl Workspace {
         if let Some(branches) = self.branches.as_mut() {
             branches.lock_for_review(reviewing);
         }
+        self.settle_focus();
+    }
+
+    /// Move focus off a panel that is no longer shown.
+    fn settle_focus(&mut self) {
+        if !self.shows(self.side) {
+            self.focus(self.side, self.main_focused);
+        }
     }
 
     /// Inner height of the half with focus; `main` is the main view's.
@@ -225,9 +257,7 @@ impl Mode for Workspace {
     }
 
     fn build(&mut self, theme: &Theme, diff_width: usize) {
-        Mode::build(&mut self.files, theme, diff_width);
-        self.open_repository();
-        self.focus(self.side, self.main_focused);
+        self.adopt_files(FilesMode::discover(theme, diff_width));
     }
 
     fn draw(
@@ -239,10 +269,14 @@ impl Mode for Workspace {
         theme: &Theme,
         budget: DrawBudget,
     ) {
-        self.side_rects = side_layout(left);
+        let shows_files = self.shows(Side::Files);
+        self.side_rects = side_layout(left, shows_files);
         self.main_rect = right;
         let (current, main_focused) = (self.side, self.main_focused);
         for side in Side::ALL {
+            if side == Side::Files && !shows_files {
+                continue;
+            }
             let area = self.side_rects[side.index()];
             let focused = side == current && !main_focused;
             match self.panel(side) {
@@ -366,6 +400,7 @@ impl Mode for Workspace {
         if let Some(branches) = &mut self.branches {
             branches.refresh();
         }
+        self.settle_focus();
         Ok(changed || self.branches.is_some())
     }
 
@@ -376,8 +411,12 @@ impl Mode for Workspace {
 }
 
 /// Split the left column into the side panels: two thirds for Files,
-/// one third for Branches.
-fn side_layout(area: Rect) -> [Rect; 2] {
+/// one third for Branches, or all of it for Branches when Files is
+/// hidden.
+fn side_layout(area: Rect, shows_files: bool) -> [Rect; 2] {
+    if !shows_files {
+        return [Rect::default(), area];
+    }
     let rects = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Fill(2), Constraint::Fill(1)])

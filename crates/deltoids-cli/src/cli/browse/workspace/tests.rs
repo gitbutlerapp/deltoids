@@ -97,6 +97,22 @@ fn commit(dir: &Path, repo: &Repository, files: &[(&str, &str)], msg: &str, seco
         .unwrap();
 }
 
+/// [`fixture`] with its staged edit committed: a clean working tree.
+fn clean_fixture() -> tempfile::TempDir {
+    let dir = fixture();
+    let repo = Repository::open(dir.path()).unwrap();
+    commit(dir.path(), &repo, &[], "say hi", 400);
+    dir
+}
+
+fn reload(workspace: &mut Workspace) {
+    let viewport = Viewport {
+        height: PANE_HEIGHT,
+        diff_width: 60,
+    };
+    workspace.reload(viewport, &Theme::default()).unwrap();
+}
+
 fn workspace(dir: &Path) -> Workspace {
     Workspace::new(FilesMode::discover_at(dir, &Theme::default(), 60))
 }
@@ -151,9 +167,18 @@ fn panel_height(workspace: &mut Workspace, n: char) -> usize {
     panel_rows(workspace, n).count()
 }
 
+/// Whether the left column shows the side panel titled `[n]`.
+fn has_panel(workspace: &mut Workspace, n: char) -> bool {
+    left_text(workspace).contains(&format!("[{n}]"))
+}
+
 /// The side panel whose border shows focus, if any.
 fn focused_panel(workspace: &mut Workspace) -> Option<char> {
-    ['1', '2'].into_iter().find(|&n| {
+    let shown: Vec<char> = ['1', '2']
+        .into_iter()
+        .filter(|&n| has_panel(workspace, n))
+        .collect();
+    shown.into_iter().find(|&n| {
         let top = *panel_rows(workspace, n).start();
         left_border_focused(workspace, top)
     })
@@ -173,6 +198,95 @@ fn side_panels_stack_files_over_branches_beside_the_main_view() {
     assert!(!left.contains("[3]"), "{left}");
     let right = right_text(&mut workspace);
     assert!(right.lines().next().unwrap().contains("[0]"), "{right}");
+}
+
+#[test]
+fn a_clean_tree_hides_files_and_branches_fills_the_column() {
+    let dir = clean_fixture();
+    let mut workspace = workspace(dir.path());
+
+    assert!(
+        !has_panel(&mut workspace, '1'),
+        "{}",
+        left_text(&mut workspace)
+    );
+    assert_eq!(
+        panel_height(&mut workspace, '2'),
+        left_rows(&mut workspace).len()
+    );
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
+    assert!(right_text(&mut workspace).contains("say hi"));
+}
+
+#[test]
+fn on_a_clean_tree_focus_stays_on_branches() {
+    let dir = clean_fixture();
+    let mut workspace = workspace(dir.path());
+
+    for key in [
+        KeyCode::Char('1'),
+        KeyCode::Tab,
+        KeyCode::BackTab,
+        KeyCode::Char('h'),
+        KeyCode::Char('l'),
+    ] {
+        press(&mut workspace, &[key]);
+        assert_eq!(focused_panel(&mut workspace), Some('2'), "{key:?}");
+    }
+}
+
+#[test]
+fn committing_every_change_hides_files_and_focuses_branches() {
+    let dir = fixture();
+    let mut workspace = workspace(dir.path());
+    press(&mut workspace, &[KeyCode::Enter]);
+    assert!(right_focused(&mut workspace));
+
+    let repo = Repository::open(dir.path()).unwrap();
+    commit(dir.path(), &repo, &[], "say hi", 400);
+    reload(&mut workspace);
+
+    assert!(!has_panel(&mut workspace, '1'));
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
+    assert!(right_text(&mut workspace).contains("say hi"));
+}
+
+#[test]
+fn a_new_change_brings_files_back_without_moving_focus() {
+    let dir = clean_fixture();
+    let mut workspace = workspace(dir.path());
+
+    edit_unstaged(dir.path());
+    reload(&mut workspace);
+
+    assert!(panel(&mut workspace, '1').contains("greet.rs"));
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
+}
+
+#[test]
+fn a_review_on_a_clean_tree_shows_files_until_esc() {
+    let dir = clean_fixture();
+    let mut workspace = workspace(dir.path());
+
+    press(&mut workspace, &[KeyCode::Enter, KeyCode::Enter]);
+    assert!(panel(&mut workspace, '1').contains("Commit "));
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
+
+    press(&mut workspace, &[KeyCode::Esc]);
+    assert!(!has_panel(&mut workspace, '1'));
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
+}
+
+#[test]
+fn the_startup_placeholder_still_opens_on_files_once_built() {
+    let dir = fixture();
+    let theme = Theme::default();
+    let mut workspace = Workspace::new(FilesMode::empty(&theme, 60));
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
+
+    workspace.adopt_files(FilesMode::discover_at(dir.path(), &theme, 60));
+
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
 }
 
 #[test]
@@ -519,8 +633,7 @@ fn esc_on_the_branches_panel_closes_a_commit_review() {
 
     press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Esc]);
 
-    let files = panel(&mut workspace, '1');
-    assert!(files.contains("[1]─Files"), "{files}");
+    assert!(!has_panel(&mut workspace, '1'), "the tree is clean");
     assert!(panel(&mut workspace, '2').contains("Commits (main)"));
 }
 
@@ -662,6 +775,7 @@ fn outside_a_repository_the_branches_panel_says_so() {
     let dir = tempfile::tempdir().unwrap();
     let mut workspace = workspace(dir.path());
 
+    assert!(!has_panel(&mut workspace, '1'));
     assert!(panel(&mut workspace, '2').contains("Not a git repository"));
 }
 
