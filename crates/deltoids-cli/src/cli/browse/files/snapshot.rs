@@ -104,6 +104,9 @@ pub(in crate::cli::browse) struct SnapshotPanel {
     receiver: Option<mpsc::Receiver<Result<Model, String>>>,
     built: Option<Result<Model, String>>,
     view: Option<Result<FilesMode, String>>,
+    /// The view was adopted since the last [`Panel::background`]: a draw
+    /// may have painted part of the frame as `Loading…`.
+    adopted: bool,
     /// Handed to the view once built; `None` for a preview.
     review: Option<review::Review>,
     main_focused: bool,
@@ -142,6 +145,7 @@ impl SnapshotPanel {
             receiver: Some(receiver),
             built: None,
             view: None,
+            adopted: false,
             review,
             main_focused: false,
             whole: false,
@@ -186,6 +190,7 @@ impl SnapshotPanel {
         }
         let built = self.built.take().expect("polled above");
         self.view = Some(built.map(|model| self.build_view(model, theme)));
+        self.adopted = true;
     }
 
     fn build_view(&mut self, model: Model, theme: &Theme) -> FilesMode {
@@ -299,7 +304,9 @@ impl Panel for SnapshotPanel {
 
     /// While building: pending until the build is ready to adopt, then
     /// changed once so the next frame adopts it. A panel off screen keeps
-    /// its build until a draw adopts it.
+    /// its build until a draw adopts it. Changed once more after a draw
+    /// adopts it, since the build can land between the side and the main
+    /// half of one frame.
     fn background(&mut self, active: bool) -> BackgroundWork {
         if self.view.is_none() {
             let announced = self.built.is_some();
@@ -309,9 +316,14 @@ impl Panel for SnapshotPanel {
                 pending: !ready,
             };
         }
-        self.view().map_or_else(BackgroundWork::default, |view| {
+        let adopted = std::mem::take(&mut self.adopted);
+        let work = self.view().map_or_else(BackgroundWork::default, |view| {
             Panel::background(view, active)
-        })
+        });
+        BackgroundWork {
+            changed: work.changed || adopted,
+            ..work
+        }
     }
 
     fn reserves_key(&self, key: KeyCode) -> bool {

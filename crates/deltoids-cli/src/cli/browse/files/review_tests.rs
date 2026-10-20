@@ -470,3 +470,21 @@ fn a_commit_review_asks_jev_about_its_hunks() {
     assert!(sent.load(std::sync::atomic::Ordering::SeqCst) > 0);
     assert!(view.label.starts_with("Commit "));
 }
+
+#[test]
+fn a_build_adopted_mid_frame_asks_for_one_more_frame() {
+    use crate::cli::browse::panel::Panel;
+    let (dir, _, second) = two_commits();
+    let mut panel =
+        SnapshotPanel::preview(dir.path().to_path_buf(), second_commit(dir.path(), &second));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while panel.background(true).pending {
+        assert!(Instant::now() < deadline, "snapshot did not build");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    // The side half drew `Loading…`; the main half adopts the build.
+    panel.adopt(&Theme::default());
+
+    assert!(panel.background(true).changed);
+}
