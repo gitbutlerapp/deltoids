@@ -11,10 +11,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::icons::{IconMode, dir_icon, file_icon};
+use super::icons::{BRANCH_GLYPH, COMMIT_GLYPH, IconMode, dir_icon, file_icon};
 use super::status::{FileMode, FileStatus, ModeChange};
 use super::tree::Row;
-use super::{FileRowMeta, RowNote};
+use super::{FileRowMeta, Root, RowNote};
 
 /// Just the basename (last `/`-separated segment) of a path.
 pub(super) fn rename_leaf(path: &str) -> String {
@@ -82,6 +82,9 @@ pub(super) fn render_row(
     }
 
     match row {
+        Row::Root(root) => root_row_spans(&mut spans, root, icons, theme, base),
+        // The pane draws the rule across its borders.
+        Row::Rule => {}
         Row::Dir { label, depth } => {
             dir_row_spans(&mut spans, label, *depth, folded, meta, icons, theme, base)
         }
@@ -91,6 +94,46 @@ pub(super) fn render_row(
     }
 
     Line::from(spans)
+}
+
+/// A commit's subject, or `upper · 2 commits` for a branch, after the
+/// git glyph when icons are on.
+fn root_row_spans(
+    spans: &mut Vec<Span<'static>>,
+    root: &Root,
+    icons: IconMode,
+    theme: &Theme,
+    base: Style,
+) {
+    let (glyph, name, color, detail) = match root {
+        Root::Commit { subject } => (
+            COMMIT_GLYPH,
+            None,
+            theme.status_modified,
+            Span::styled(subject.clone(), base),
+        ),
+        Root::Branch { name, commits } => {
+            let noun = if *commits == 1 { "commit" } else { "commits" };
+            (
+                BRANCH_GLYPH,
+                Some(name.clone()),
+                theme.status_added,
+                Span::styled(
+                    format!("· {commits} {noun}"),
+                    base.fg(rgb_to_color(theme.muted)),
+                ),
+            )
+        }
+    };
+    let accent = base.fg(rgb_to_color(color));
+    if icons == IconMode::On {
+        spans.push(Span::styled(format!("{glyph} "), accent));
+    }
+    if let Some(name) = name {
+        spans.push(Span::styled(name, accent));
+        spans.push(Span::styled(" ", base));
+    }
+    spans.push(detail);
 }
 
 #[allow(clippy::too_many_arguments)]

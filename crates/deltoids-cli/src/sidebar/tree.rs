@@ -1,12 +1,17 @@
 //! Tree-building axis: turn the flat file list into a sorted, collapsed
 //! path tree and walk it into renderable [`Row`]s.
 
+use super::Root;
 use super::status::{SidebarFile, display_path};
 
 /// One renderable row in the sidebar. `Dir` rows are headers; `File`
 /// rows are leaves and are the only rows the user can land on.
 #[derive(Debug, Clone)]
 pub(super) enum Row {
+    /// The commit or branch under review, above the tree.
+    Root(Root),
+    /// The rule between the root row and the tree. Never selected.
+    Rule,
     Dir {
         /// Display label (with trailing `/`, possibly multi-segment for
         /// collapsed chains like `deltoids/src/`).

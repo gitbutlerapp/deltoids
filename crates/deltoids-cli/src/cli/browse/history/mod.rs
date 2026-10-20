@@ -16,9 +16,8 @@
 //! at a time, and the main view previews the selected commit's diff.
 //! `Esc` steps back up to the branches, keeping the selection. A double
 //! click on a branch or commit does what `Enter` does on it. While the
-//! Files panel shows a review, the side half shows the review's commits
-//! and their messages in place of the list ([`History::show_review`]);
-//! the list keys scroll them.
+//! Files panel shows a review, the list stays on the reviewed row: keys,
+//! clicks, and the wheel leave it there ([`History::lock_for_review`]).
 //!
 //! The lists are a snapshot; [`History::refresh`] re-reads them and keeps
 //! each selection on the same branch or commit.
@@ -46,11 +45,9 @@ use super::panel::{Panel, panel_title};
 use super::vcs::{Branch, Vcs};
 
 mod cursor;
-mod review_info;
 mod tree;
 
 use cursor::Cursor;
-use review_info::ReviewInfo;
 use tree::Tree;
 
 /// How many commits one page of a commit list loads.
@@ -147,8 +144,8 @@ pub(super) struct History {
     preview: Option<SnapshotPanel>,
     /// A review `Enter` asked for, until the workspace takes it.
     review_request: Option<Snapshot>,
-    /// What the Files panel reviews, shown in place of the list.
-    reviewing: Option<ReviewInfo>,
+    /// The Files panel shows a review: the list stays on its row.
+    reviewing: bool,
     double_click: DoubleClick,
     /// Seconds since the epoch at the last read; commit ages count from
     /// here.
@@ -178,7 +175,7 @@ impl History {
             commits: None,
             preview: None,
             review_request: None,
-            reviewing: None,
+            reviewing: false,
             double_click: DoubleClick::default(),
             now: now(),
             side_rect: Rect::default(),
@@ -303,21 +300,10 @@ impl History {
         self.review_request.take()
     }
 
-    /// Show the commits of `snapshot`, what the Files panel reviews, in
-    /// place of the list; `None` brings the list back as it was. The
-    /// same snapshot again keeps its scroll.
-    pub(super) fn show_review(&mut self, snapshot: Option<&Snapshot>) {
-        let Some(snapshot) = snapshot else {
-            self.reviewing = None;
-            return;
-        };
-        if self
-            .reviewing
-            .as_ref()
-            .is_none_or(|info| !info.shows(snapshot))
-        {
-            self.reviewing = Some(ReviewInfo::new(snapshot.clone()));
-        }
+    /// Keep the list on the reviewed row while the Files panel shows a
+    /// review, which it opened from the selected row.
+    pub(super) fn lock_for_review(&mut self, reviewing: bool) {
+        self.reviewing = reviewing;
     }
 
     fn move_list(&mut self, key: KeyCode, height: usize) {
@@ -517,10 +503,6 @@ impl Panel for History {
         theme: &Theme,
     ) {
         self.side_rect = area;
-        if let Some(info) = self.reviewing.as_mut() {
-            info.draw(frame, area, number, focused, self.now, theme);
-            return;
-        }
         match self.screen {
             Screen::Branches => {
                 let color = pane_border_color(focused, theme);
@@ -577,11 +559,7 @@ impl Panel for History {
                 Screen::Branches | Screen::Commits => self.forward_key(key, height),
             };
         }
-        if let Some(info) = self.reviewing.as_mut() {
-            if matches!(key, KeyCode::Char('J' | 'K')) {
-                return self.forward_key(key, height);
-            }
-            info.handle_key(key, height);
+        if self.reviewing && !matches!(key, KeyCode::Enter | KeyCode::Char('J' | 'K')) {
             return AppCommand::Continue;
         }
         match key {
@@ -611,14 +589,12 @@ impl Panel for History {
         let scroll = |history: &mut Self, key| {
             if in_main {
                 history.scroll_log(key, height);
-            } else if let Some(info) = history.reviewing.as_mut() {
-                info.handle_key(key, height);
-            } else {
+            } else if !history.reviewing {
                 history.move_list(key, height);
             }
         };
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) if !in_main && self.reviewing.is_none() => {
+            MouseEventKind::Down(MouseButton::Left) if !in_main && !self.reviewing => {
                 if self.click_row(mouse.row).is_some() && double {
                     self.open_selected();
                 }

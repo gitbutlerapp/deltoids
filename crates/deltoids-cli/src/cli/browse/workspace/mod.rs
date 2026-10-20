@@ -11,8 +11,8 @@
 //!    diff. Drills down into a branch's commits (main: the selected
 //!    commit's diff). `Enter` on a commit, or on an applied GitButler
 //!    branch, opens its review in Files. While Files shows a review,
-//!    Branches shows the review's commits and their messages, and `Esc`
-//!    there closes the review.
+//!    Branches stays on the reviewed row, and `Esc` there closes the
+//!    review.
 //!
 //! Focus is on one side panel or on the main view. Files takes two
 //! thirds of the column and Branches one third. `1`/`2` focus a side
@@ -192,12 +192,12 @@ impl Workspace {
     }
 
     /// Show `review` in the Files panel, or the working tree for `None`,
-    /// and tell the branches panel what, if anything, is under review.
+    /// and lock the branches panel on the reviewed row while a review shows.
     fn set_review(&mut self, review: Option<SnapshotPanel>) {
         self.review = review;
-        let snapshot = self.review.as_ref().map(SnapshotPanel::snapshot);
+        let reviewing = self.review.is_some();
         if let Some(branches) = self.branches.as_mut() {
-            branches.show_review(snapshot);
+            branches.lock_for_review(reviewing);
         }
     }
 

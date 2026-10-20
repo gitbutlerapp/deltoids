@@ -5,8 +5,9 @@
 //! and diffs them on a worker thread, saying `Loading…` until the build
 //! is ready. Then every [`Panel`] call goes to the snapshot's read-only
 //! [`FilesMode`]: file tree and diff, with comments and hunk reshaping
-//! but no staging, discarding, or reload. A preview never asks Jev for
-//! judgments; a review does.
+//! but no staging, discarding, or reload. The file tree starts on a row
+//! for the commit or branch, whose diff is its commits' `git show`
+//! headers alone. A preview never asks Jev for judgments; a review does.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -27,6 +28,7 @@ use crate::cli::browse::diff_scrollbar;
 use crate::cli::browse::mode::{AppCommand, BackgroundWork, DrawBudget};
 use crate::cli::browse::panel::{Panel, panel_title};
 use crate::cli::browse::vcs::Branch;
+use crate::sidebar::Root;
 
 /// What a snapshot shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +72,20 @@ impl Snapshot {
         match self {
             Self::Commit(commit) => format!("Commit {}", commit.short_id),
             Self::Branch { name, .. } => format!("Review {name}"),
+        }
+    }
+
+    /// The file tree's root row: the commit's subject, or the branch and
+    /// how many commits it has.
+    fn root(&self) -> Root {
+        match self {
+            Self::Commit(commit) => Root::Commit {
+                subject: commit.summary.clone(),
+            },
+            Self::Branch { name, commits, .. } => Root::Branch {
+                name: name.clone(),
+                commits: commits.len(),
+            },
         }
     }
 
@@ -139,11 +155,7 @@ impl SnapshotPanel {
         &self.snapshot == snapshot
     }
 
-    pub(in crate::cli::browse) fn snapshot(&self) -> &Snapshot {
-        &self.snapshot
-    }
-
-    /// Show the whole snapshot, as `git show` does: a commit's header
+    /// Show the whole snapshot, as `git show` does: its commits' header
     /// above every file's diff. Off, the diff follows the file tree.
     pub(in crate::cli::browse) fn show_whole(&mut self, whole: bool) {
         self.whole = whole;
@@ -180,9 +192,7 @@ impl SnapshotPanel {
         let mut view = FilesMode::new(model, Patches::default(), None, theme, self.diff_width);
         view.label = self.snapshot.label();
         view.read_only = true;
-        if let Snapshot::Commit(commit) = &self.snapshot {
-            view.commit = Some(commit.clone());
-        }
+        view.show_snapshot(self.snapshot.root(), self.snapshot.commits().to_vec());
         if let Some(review) = self.review.take() {
             view.review = review;
             view.start_review();

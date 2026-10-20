@@ -417,6 +417,7 @@ fn enter_on_a_branch_lists_its_commits_and_enter_reviews_one_in_files() {
     assert!(files.contains(&format!("Commit {short}")), "{files}");
     assert!(files.contains("feature.rs"), "{files}");
     assert_eq!(focused_panel(&mut workspace), Some('1'));
+    press(&mut workspace, &[KeyCode::Char('j')]);
     assert!(right_text(&mut workspace).contains("fn feature()"));
 
     press(&mut workspace, &[KeyCode::Esc]);
@@ -454,7 +455,7 @@ fn head_short(dir: &Path) -> String {
 }
 
 #[test]
-fn reviewing_a_commit_shows_its_details_in_the_branches_panel() {
+fn a_commit_review_opens_on_its_commit_row_and_header() {
     let dir = explained_fixture("The body says why the change matters.");
     let mut workspace = workspace(dir.path());
 
@@ -463,24 +464,24 @@ fn reviewing_a_commit_shows_its_details_in_the_branches_panel() {
         &[KeyCode::Char('2'), KeyCode::Enter, KeyCode::Enter],
     );
 
-    let details = panel(&mut workspace, '2');
+    let short = head_short(dir.path());
+    let files = panel(&mut workspace, '1');
+    assert!(files.contains(&format!("[1]─Commit {short}")), "{files}");
+    let rows = panel_lines(&mut workspace, '1');
+    assert!(rows[0].ends_with("explain the change"), "{rows:#?}");
+    assert!(!rows[0].contains(&short), "{rows:#?}");
+    let lines: Vec<&str> = files.lines().collect();
     assert!(
-        details.contains(&format!("Commit {}", head_short(dir.path()))),
-        "{details}"
+        lines[2].starts_with("├──") && lines[2].ends_with("──┤"),
+        "{files}"
     );
+    let header = right_text(&mut workspace);
     assert!(
-        details.contains("Ada Lovelace <ada@example.com>"),
-        "{details}"
+        header.contains("Author: Ada Lovelace <ada@example.com>"),
+        "{header}"
     );
-    assert!(details.contains("explain the change"), "{details}");
-    assert!(!details.contains("shout greeting"), "{details}");
-
-    press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Char('G')]);
-    let details = panel(&mut workspace, '2');
-    assert!(
-        details.contains("The body says why the change"),
-        "{details}"
-    );
+    assert!(header.contains("The body says why the change"), "{header}");
+    assert!(!header.contains("println!"), "{header}");
 }
 
 #[test]
@@ -508,7 +509,7 @@ fn closing_a_commit_review_brings_back_the_commit_list() {
 }
 
 #[test]
-fn esc_on_the_commit_details_closes_the_review() {
+fn esc_on_the_branches_panel_closes_a_commit_review() {
     let dir = explained_fixture("Why.");
     let mut workspace = workspace(dir.path());
     press(
@@ -524,21 +525,24 @@ fn esc_on_the_commit_details_closes_the_review() {
 }
 
 #[test]
-fn a_long_commit_message_scrolls_in_the_branches_panel() {
-    let body: Vec<String> = (1..=12).map(|n| format!("note {n:02}")).collect();
-    let dir = explained_fixture(&body.join("\n"));
+fn the_branches_list_stays_on_the_reviewed_commit() {
+    let dir = explained_fixture("Why.");
     let mut workspace = workspace(dir.path());
     press(
         &mut workspace,
         &[KeyCode::Char('2'), KeyCode::Enter, KeyCode::Enter],
     );
-    assert!(!panel(&mut workspace, '2').contains("note 12"));
+    let list = panel(&mut workspace, '2');
+    assert!(list.contains("Commits (main)"), "{list}");
 
-    press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Char('G')]);
+    press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Char('j')]);
+    let rows = left_rows(&mut workspace);
+    click(&mut workspace, 5, rows.len() as u16 - 2);
 
-    let details = panel(&mut workspace, '2');
-    assert!(details.contains("note 12"), "{details}");
-    assert!(!details.contains("explain the change"), "{details}");
+    assert_eq!(panel(&mut workspace, '2'), list);
+    let preview = right_text(&mut workspace);
+    assert!(preview.contains("explain the change"), "{preview}");
+    assert!(!preview.contains("shout greeting"), "{preview}");
 }
 
 fn feature_tip(dir: &Path) -> String {
@@ -684,7 +688,7 @@ fn a_reload_picks_up_new_commits_and_branches() {
 }
 
 #[test]
-fn a_commit_review_follows_its_file_tree_without_the_header() {
+fn a_commit_review_shows_the_header_alone_then_follows_its_file_tree() {
     let dir = fixture();
     let mut workspace = workspace(dir.path());
     press(
@@ -694,7 +698,11 @@ fn a_commit_review_follows_its_file_tree_without_the_header() {
     assert!(right_text(&mut workspace).contains("Author: Ada Lovelace"));
 
     press(&mut workspace, &[KeyCode::Enter]);
+    let header = right_text(&mut workspace);
+    assert!(header.contains("Author: Ada Lovelace"), "{header}");
+    assert!(!header.contains("fn feature()"), "{header}");
 
+    press(&mut workspace, &[KeyCode::Char('j')]);
     let diff = right_text(&mut workspace);
     assert!(!diff.contains("Author:"), "{diff}");
     assert!(diff.contains("fn feature()"), "{diff}");
@@ -876,12 +884,9 @@ fn a_commit_row_previews_its_diff_and_enter_reviews_it_in_files() {
     assert!(files.contains("feature.rs"), "{files}");
     assert!(!files.contains("greet.rs"), "{files}");
     assert_eq!(focused_panel(&mut workspace), Some('1'));
-    let details = panel(&mut workspace, '2');
-    assert!(
-        details.contains("Ada Lovelace <ada@example.com>"),
-        "{details}"
-    );
-    assert!(!details.contains("abcd add feature"), "{details}");
+    assert!(panel(&mut workspace, '2').contains("add feature"));
+    assert!(right_text(&mut workspace).contains("Author: Ada Lovelace"));
+    press(&mut workspace, &[KeyCode::Char('j')]);
     assert!(right_text(&mut workspace).contains("fn feature()"));
 
     press(&mut workspace, &[KeyCode::Esc]);
@@ -926,7 +931,7 @@ fn double_clicking_a_workspace_branch_reviews_it_in_files() {
     assert!(files.contains("Review feature"), "{files}");
     assert!(files.contains("feature.rs"), "{files}");
     assert_eq!(focused_panel(&mut workspace), Some('1'));
-    assert!(panel(&mut workspace, '2').contains("[2]─Review feature"));
+    assert!(panel(&mut workspace, '2').contains("[feature]"));
 }
 
 /// Commit `files` on top of `branch` without touching the working tree,
@@ -1027,25 +1032,24 @@ fn enter_on_a_stacked_branch_reviews_its_own_commits_in_files() {
     assert!(!files.contains("greet.rs"), "{files}");
     assert_eq!(focused_panel(&mut workspace), Some('1'));
     assert!(files.contains("upper.md"), "{files}");
-    press(&mut workspace, &[KeyCode::Char('j')]);
+    let rows = panel_lines(&mut workspace, '1');
+    assert!(rows[0].contains("upper · 2 commits"), "{rows:#?}");
+
+    let header = right_text(&mut workspace);
+    let at = |text: &str| header.find(text);
+    assert!(at("finish upper") < at("draft upper"), "{header}");
+    assert!(at("draft upper").is_some(), "{header}");
+    assert_eq!(at("add feature"), None, "{header}");
+
+    press(&mut workspace, &[KeyCode::Char('j'), KeyCode::Char('j')]);
     let right = right_text(&mut workspace);
     assert!(right.contains("final"), "{right}");
     assert!(!right.contains("draft"), "{right}");
-
-    let details = panel(&mut workspace, '2');
-    assert!(details.contains("[2]─Review upper"), "{details}");
-    assert!(details.contains("finish upper"), "{details}");
-    assert!(!details.contains("draft upper"), "{details}");
-
-    press(&mut workspace, &[KeyCode::Char('2'), KeyCode::Char('G')]);
-    let details = panel(&mut workspace, '2');
-    assert!(details.contains("draft upper"), "{details}");
-    assert!(!details.contains("add feature"), "{details}");
 }
 
 #[cfg(unix)]
 #[test]
-fn esc_on_a_branch_review_details_closes_the_review() {
+fn esc_on_the_branches_panel_closes_a_branch_review() {
     let dir = fixture();
     let stubs = tempfile::tempdir().unwrap();
     let mut workspace = stacked_workspace(dir.path(), stubs.path());
@@ -1087,7 +1091,7 @@ fn a_review_keeps_its_comments_until_esc_brings_back_the_working_tree() {
     press(&mut workspace, &[KeyCode::Char(' '), KeyCode::Char('d')]);
     assert!(panel(&mut workspace, '1').contains("Review upper"));
 
-    press(&mut workspace, &[KeyCode::Enter]);
+    press(&mut workspace, &[KeyCode::Char('j'), KeyCode::Enter]);
     right_text(&mut workspace);
     press(&mut workspace, &[KeyCode::Char('j'), KeyCode::Char('c')]);
     for ch in "why final".chars() {

@@ -124,6 +124,13 @@ pub(super) fn draw_sidebar(
     let color = pane_border_color(focused, theme);
     let block = pane_block_with_title_line(title, color, footer);
     frame.render_widget(Paragraph::new(visible).block(block), area);
+    if let Some(offset) = sidebar
+        .rule_position()
+        .and_then(|position| position.checked_sub(start))
+        .filter(|&offset| start + offset < end)
+    {
+        draw_rule(frame, area, inner.y + offset as u16, color);
+    }
 
     render_pane_scrollbar(
         frame,
@@ -133,6 +140,22 @@ pub(super) fn draw_sidebar(
         pane_inner_height(area),
         focused,
         theme,
+    );
+}
+
+/// `├───┤` across `area` at screen row `y`, joined to its side borders.
+fn draw_rule(frame: &mut ratatui::Frame<'_>, area: Rect, y: u16, color: ratatui::style::Color) {
+    let inner = area.width.saturating_sub(2) as usize;
+    let rule = format!("├{}┤", "─".repeat(inner));
+    let row = Rect {
+        x: area.x,
+        y,
+        width: area.width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(rule, Style::default().fg(color)))),
+        row,
     );
 }
 

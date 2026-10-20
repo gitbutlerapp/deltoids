@@ -19,6 +19,9 @@
 //!   selection visible).
 //! - [`Sidebar::row_count`] — visible rows (rows under a folded
 //!   directory are hidden).
+//! - [`Sidebar::set_root`] / [`Sidebar::root_selected`] — a [`Root`] row
+//!   above the tree for the commit or branch under review; selecting it
+//!   selects no files.
 //!
 //! ## Module layout
 //!
@@ -55,6 +58,20 @@ pub use status::{
 
 use render::{arrow_columns, copy_origin, rename_leaf, render_row};
 use tree::{Row, build_rows};
+
+/// The row above the file tree that stands for the commit or branch
+/// under review. Selecting it selects no files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Root {
+    /// The panel title names the commit, so the row shows its subject.
+    Commit {
+        subject: String,
+    },
+    Branch {
+        name: String,
+        commits: usize,
+    },
+}
 
 /// Aggregate statistics about the resolved file set, summarised for
 /// display below the sidebar (total file count plus cumulative line
@@ -100,6 +117,8 @@ pub struct Sidebar {
     theme: Theme,
     /// Aggregate statistics computed at build time.
     totals: Totals,
+    /// The row above the tree, kept across rebuilds.
+    root: Option<Root>,
 }
 
 /// The set of folded directories, carried from one sidebar to the next
@@ -141,6 +160,20 @@ pub(super) struct FileRowMeta {
     pub(super) note: Option<RowNote>,
 }
 
+impl FileRowMeta {
+    fn empty() -> Self {
+        Self {
+            status: None,
+            stage: None,
+            dir_stage: None,
+            deltas: None,
+            rename: None,
+            extra: FileMetadata::default(),
+            note: None,
+        }
+    }
+}
+
 impl Sidebar {
     /// Build the sidebar from a slice of files plus a theme. Captures the
     /// icon mode from the environment.
@@ -162,8 +195,52 @@ impl Sidebar {
         Self::from_rows(files, theme, icons, build_rows(files, hidden))
     }
 
+    /// The same sidebar over `files` with `hidden` left out. A root row
+    /// stays, selected as on [`Self::set_root`].
     pub fn rebuilt(&self, files: &[SidebarFile<'_>], hidden: &[bool]) -> Self {
-        Self::build_hiding(files, &self.theme, self.icons, hidden)
+        let mut sidebar = Self::build_hiding(files, &self.theme, self.icons, hidden);
+        if let Some(root) = &self.root {
+            sidebar.set_root(root.clone());
+        }
+        sidebar
+    }
+
+    /// Put `root` above the tree, a rule between them, and select it.
+    pub fn set_root(&mut self, root: Root) {
+        self.rows.splice(0..0, [Row::Root(root.clone()), Row::Rule]);
+        self.file_meta
+            .splice(0..0, [FileRowMeta::empty(), FileRowMeta::empty()]);
+        self.dir_paths.splice(0..0, [None, None]);
+        self.root = Some(root);
+        self.scroll = 0;
+        self.refold(0, 1);
+    }
+
+    /// Visible position of the rule under the root row, which the pane
+    /// draws across its borders.
+    pub fn rule_position(&self) -> Option<usize> {
+        self.visible
+            .iter()
+            .position(|&row| matches!(self.rows[row], Row::Rule))
+    }
+
+    /// `target`, or the row past the rule on the way from the selection
+    /// when `target` is the rule.
+    fn past_rule(&self, target: usize) -> usize {
+        if self.rule_position() != Some(target) {
+            return target;
+        }
+        if target > self.selected && target + 1 < self.visible.len() {
+            target + 1
+        } else {
+            target.saturating_sub(1)
+        }
+    }
+
+    /// Whether the root row is selected.
+    pub fn root_selected(&self) -> bool {
+        self.selected_row()
+            .is_some_and(|row| matches!(self.rows[row], Row::Root(_)))
     }
 
     fn from_rows(
@@ -177,14 +254,9 @@ impl Sidebar {
             .iter()
             .enumerate()
             .map(|(idx, row)| match row {
-                Row::Dir { .. } => FileRowMeta {
-                    status: None,
-                    stage: None,
+                Row::Dir { .. } | Row::Root(_) | Row::Rule => FileRowMeta {
                     dir_stage: dir_aggregate(&rows, &stages, idx),
-                    deltas: None,
-                    rename: None,
-                    extra: FileMetadata::default(),
-                    note: None,
+                    ..FileRowMeta::empty()
                 },
                 Row::File { file_index, .. } => {
                     let f = &files[*file_index];
@@ -236,6 +308,7 @@ impl Sidebar {
             file_meta,
             theme: theme.clone(),
             totals,
+            root: None,
         };
         sidebar.render_all();
         sidebar
@@ -246,7 +319,7 @@ impl Sidebar {
         for (index, row) in self.rows.iter().enumerate() {
             match row {
                 Row::File { file_index, .. } => self.file_meta[index].stage = stages[*file_index],
-                Row::Dir { .. } => {
+                Row::Dir { .. } | Row::Root(_) | Row::Rule => {
                     self.file_meta[index].dir_stage = dir_aggregate(&self.rows, stages, index)
                 }
             }
@@ -374,6 +447,9 @@ impl Sidebar {
         let Some(&row) = self.visible.get(position) else {
             return false;
         };
+        if matches!(self.rows[row], Row::Rule) {
+            return false;
+        }
         self.set_selected(position, viewport);
         if let Row::Dir { depth, .. } = &self.rows[row]
             && arrow_columns(*depth).contains(&column)
@@ -443,13 +519,14 @@ impl Sidebar {
     /// header is followed by its contents). `None` only when there are
     /// no files at all.
     pub fn nearest_file_index(&self) -> Option<usize> {
-        self.rows
-            .iter()
-            .skip(self.selected_row()?)
-            .find_map(|r| match r {
-                Row::File { file_index, .. } => Some(*file_index),
-                Row::Dir { .. } => None,
-            })
+        let selected = self.selected_row()?;
+        if self.root_selected() {
+            return None;
+        }
+        self.rows.iter().skip(selected).find_map(|r| match r {
+            Row::File { file_index, .. } => Some(*file_index),
+            Row::Dir { .. } | Row::Root(_) | Row::Rule => None,
+        })
     }
 
     /// Display-order positions of files matching the current selection.
@@ -466,6 +543,7 @@ impl Sidebar {
     pub fn selection_display_range(&self) -> Option<Range<usize>> {
         let row = self.selected_row()?;
         match self.rows[row] {
+            Row::Root(_) | Row::Rule => None,
             Row::Dir { depth, .. } => self.subtree_range_for_dir(row, depth),
             Row::File { .. } => {
                 let start = self.files_before(row);
@@ -564,6 +642,7 @@ impl Sidebar {
 
     /// Select the visible row at position `target`.
     pub fn set_selected(&mut self, target: usize, viewport: usize) {
+        let target = self.past_rule(target);
         if target == self.selected {
             return;
         }
@@ -629,6 +708,7 @@ impl Sidebar {
 fn row_depth(row: &Row) -> usize {
     match row {
         Row::Dir { depth, .. } | Row::File { depth, .. } => *depth,
+        Row::Root(_) | Row::Rule => 0,
     }
 }
 
@@ -643,7 +723,7 @@ fn dir_paths(rows: &[Row]) -> Vec<Option<String>> {
                 parents.push(label);
                 Some(parents.concat())
             }
-            Row::File { .. } => None,
+            Row::File { .. } | Row::Root(_) | Row::Rule => None,
         })
         .collect()
 }
@@ -667,7 +747,7 @@ fn dir_aggregate(rows: &[Row], stages: &[Option<StageStatus>], dir_idx: usize) -
     let mut has_unstaged = false;
     for row in &rows[dir_idx + 1..] {
         let (row_depth, file_index) = match row {
-            Row::Dir { depth, .. } => (*depth, None),
+            Row::Dir { .. } | Row::Root(_) | Row::Rule => (row_depth(row), None),
             Row::File {
                 depth, file_index, ..
             } => (*depth, Some(*file_index)),
@@ -1416,5 +1496,123 @@ mod tests {
         sidebar.reveal_selected(2);
 
         assert_eq!(sidebar.scroll(), sidebar.selected() - 1);
+    }
+
+    fn commit_root() -> Root {
+        Root::Commit {
+            subject: "fit the help row".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_root_row_tops_the_tree_selected_and_selects_no_files() {
+        let diffs = [fd("src/a.rs"), fd("b.rs")];
+        let files = plain_files(&diffs);
+        let plain = Sidebar::build_with_icons(&files, &theme(), IconMode::Off);
+
+        let mut sidebar = Sidebar::build_with_icons(&files, &theme(), IconMode::Off);
+        sidebar.set_root(commit_root());
+
+        assert_eq!(
+            texts(&sidebar),
+            ["fit the help row", "", "M b.rs", "▼ src/", "  M a.rs"]
+        );
+        assert_eq!(sidebar.selected(), 0);
+        assert_eq!(sidebar.rule_position(), Some(1));
+        assert!(sidebar.root_selected());
+        assert_eq!(sidebar.selection_display_range(), None);
+        assert_eq!(sidebar.nearest_file_index(), None);
+        assert_eq!(sidebar.selected_directory_path(), None);
+        assert_eq!(sidebar.display_order(), plain.display_order());
+        assert_eq!(sidebar.totals(), plain.totals());
+    }
+
+    #[test]
+    fn below_the_root_row_the_tree_selects_as_without_it() {
+        let diffs = [fd("src/a.rs"), fd("src/c.rs"), fd("b.rs")];
+        let files = plain_files(&diffs);
+        let mut sidebar = Sidebar::build_with_icons(&files, &theme(), IconMode::Off);
+        sidebar.set_root(commit_root());
+
+        sidebar.move_down(20);
+        assert!(!sidebar.root_selected());
+        assert_eq!(sidebar.selected_file_index(), Some(2));
+        assert_eq!(sidebar.selection_display_range(), Some(0..1));
+
+        sidebar.move_down(20);
+        assert_eq!(sidebar.selected_directory_path().as_deref(), Some("src/"));
+        assert_eq!(sidebar.selection_display_range(), Some(1..3));
+        assert!(sidebar.toggle_selected_dir(20));
+        assert_eq!(
+            texts(&sidebar),
+            ["fit the help row", "", "M b.rs", "▶ src/"]
+        );
+
+        sidebar.top(20);
+        assert!(sidebar.root_selected());
+        assert!(!sidebar.toggle_selected_dir(20));
+    }
+
+    #[test]
+    fn the_rule_under_the_root_row_is_never_selected() {
+        let diffs = [fd("a.rs"), fd("b.rs")];
+        let files = plain_files(&diffs);
+        let mut sidebar = Sidebar::build_with_icons(&files, &theme(), IconMode::Off);
+        sidebar.set_root(commit_root());
+
+        sidebar.move_down(20);
+        assert_eq!(sidebar.selected_file_index(), Some(0));
+        sidebar.move_up(20);
+        assert!(sidebar.root_selected());
+        assert!(!sidebar.click(1, 0, 20));
+        assert!(sidebar.root_selected());
+        sidebar.bottom(20);
+        sidebar.page_up(1);
+        assert_eq!(sidebar.selected_file_index(), Some(0));
+        sidebar.page_up(1);
+        assert!(sidebar.root_selected());
+    }
+
+    #[test]
+    fn a_rebuilt_sidebar_keeps_its_root_row() {
+        let diffs = [fd("a.rs"), fd("b.rs")];
+        let files = plain_files(&diffs);
+        let mut sidebar = Sidebar::build_with_icons(&files, &theme(), IconMode::Off);
+        sidebar.set_root(commit_root());
+
+        let rebuilt = sidebar.rebuilt(&files, &[true, false]);
+
+        assert_eq!(texts(&rebuilt), ["fit the help row", "", "M b.rs"]);
+        assert!(rebuilt.root_selected());
+    }
+
+    #[test]
+    fn a_branch_root_row_counts_its_commits() {
+        let diffs = [fd("a.rs")];
+        let files = plain_files(&diffs);
+        let build = |commits| {
+            let mut sidebar = Sidebar::build_with_icons(&files, &theme(), IconMode::Off);
+            sidebar.set_root(Root::Branch {
+                name: "upper".to_string(),
+                commits,
+            });
+            line_text(&sidebar.rows()[0])
+        };
+
+        assert_eq!(build(1), "upper · 1 commit");
+        assert_eq!(build(3), "upper · 3 commits");
+    }
+
+    #[test]
+    fn with_icons_the_root_row_leads_with_its_glyph() {
+        let diffs = [fd("a.rs")];
+        let files = plain_files(&diffs);
+
+        let mut sidebar = Sidebar::build_with_icons(&files, &theme(), IconMode::On);
+        sidebar.set_root(commit_root());
+
+        let text = line_text(&sidebar.rows()[0]);
+        let glyph = text.strip_suffix(" fit the help row").unwrap();
+        assert_eq!(glyph.chars().count(), 1, "{text}");
     }
 }

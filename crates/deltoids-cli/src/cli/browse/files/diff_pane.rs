@@ -565,7 +565,7 @@ fn placeholder_file_block(
 #[derive(PartialEq, Eq)]
 struct WindowKey {
     files: Option<Vec<usize>>,
-    header: Option<String>,
+    header: Vec<String>,
     epoch: CacheEpoch,
     blocks: u64,
     comments: u64,
@@ -638,8 +638,8 @@ pub(super) struct DiffPane {
     current_layout: ChangeLayout,
     /// What the no-files render shows: the clean state or a build error.
     empty_state: EmptyPane,
-    /// The commit whose `git show` header tops the window, if any.
-    header: Option<git::Commit>,
+    /// The commits whose `git show` headers top the window, in order.
+    header: Vec<git::Commit>,
     /// Low-value hunks are collapsed; the title says so.
     hide_low: bool,
 }
@@ -663,16 +663,17 @@ impl DiffPane {
             window_complete: false,
             current_layout: ChangeLayout::Grouped,
             empty_state: EmptyPane::NoChanges,
-            header: None,
+            header: Vec::new(),
             hide_low: false,
         }
     }
 
-    /// Top the window with `commit`'s header, scrolling with the diff,
-    /// or drop the header with `None`.
-    pub(super) fn set_header(&mut self, commit: Option<git::Commit>) {
-        if self.header != commit {
-            self.header = commit;
+    /// Top the window with each of `commits`' headers, scrolling with the
+    /// diff, or drop the header with none. A header shows even when the
+    /// selection has no files.
+    pub(super) fn set_header(&mut self, commits: &[git::Commit]) {
+        if self.header != commits {
+            self.header = commits.to_vec();
             self.window_key = None;
             self.cursor.scroll = 0;
         }
@@ -715,7 +716,7 @@ impl DiffPane {
         self.current_layout = layout;
         self.cached_width = width;
         self.title = spec.title;
-        self.empty = spec.order.is_empty();
+        self.empty = spec.order.is_empty() && self.header.is_empty();
     }
 
     /// Assemble the selected window's file blocks into one line vector and
@@ -742,7 +743,7 @@ impl DiffPane {
             files: display_range
                 .clone()
                 .map(|range| spec.order[range].to_vec()),
-            header: self.header.as_ref().map(|commit| commit.id.clone()),
+            header: self.header.iter().map(|commit| commit.id.clone()).collect(),
             epoch: CacheEpoch {
                 width,
                 layout,
@@ -790,10 +791,10 @@ impl DiffPane {
             return;
         }
         let files = key.files.clone().unwrap_or_default();
-        self.window_complete = self.header.is_none()
+        self.window_complete = self.header.is_empty()
             && matches!(files.as_slice(), [file] if self.cache.complete(key.epoch, *file));
         if files.is_empty() {
-            self.set_window(Vec::new(), false);
+            self.set_header_window(key, width, theme);
             return;
         }
 
@@ -853,6 +854,18 @@ impl DiffPane {
         frame.render_widget(block, area);
         if self.hide_low {
             draw_filter_flag(frame, area, theme);
+        }
+    }
+
+    /// A window of no files: the header's rows alone, kept until `key`
+    /// changes, or nothing without a header.
+    fn set_header_window(&mut self, key: WindowKey, width: usize, theme: &Theme) {
+        let header = self.header_rows(width, theme);
+        let keep = !header.is_empty();
+        self.file_starts.clear();
+        self.set_window(header, false);
+        if keep {
+            self.window_key = Some(key);
         }
     }
 
@@ -1032,9 +1045,13 @@ impl DiffPane {
     }
 
     /// Handle a key while the diff pane is focused: `j`/`k` walk diff
-    /// lines, the rest scroll. Everything else is ignored.
+    /// lines, or scroll a row when there are none (a header alone); the
+    /// rest scroll. Everything else is ignored.
     pub(super) fn handle_key(&mut self, key: KeyCode, viewport: usize) {
+        let lines = self.window.iter().any(DiffRow::is_selectable);
         match key {
+            KeyCode::Char('j') | KeyCode::Down if !lines => self.scroll_by(1, viewport),
+            KeyCode::Char('k') | KeyCode::Up if !lines => self.scroll_by(-1, viewport),
             KeyCode::Char('j') | KeyCode::Down => {
                 self.step_cursor(Step::Down, viewport);
             }

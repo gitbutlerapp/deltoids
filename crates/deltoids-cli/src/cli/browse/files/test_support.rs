@@ -147,7 +147,7 @@ pub(super) fn make_state(files: &[ResolvedFile]) -> FilesMode {
         hide_low_hunks: false,
         label: "Files".to_string(),
         read_only: false,
-        commit: None,
+        commits: Vec::new(),
         whole: false,
     };
     state.start_review();

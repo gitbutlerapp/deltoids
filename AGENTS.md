@@ -101,7 +101,6 @@ crates/
         tests.rs             #     layout and navigation tests
       history/               #   [2] Branches panel (local, or GitButler's)
         mod.rs               #     drill-down to a branch's commits, list rendering
-        review_info.rs       #     the reviewed commits and messages in place of the list
         cursor.rs            #     list selection + scroll
         tree.rs              #     branch rows; GitButler workspace drawn like `but status`
       files/                 #   FilesMode (working-tree diff; read-only snapshots)

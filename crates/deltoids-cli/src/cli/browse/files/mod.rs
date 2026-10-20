@@ -49,7 +49,7 @@ use ratatui::layout::{Position, Rect};
 use deltoids::{ChangeLayout, Diff, LineKind, Theme, git};
 
 use crate::cli::browse::scroll::{ScrollDir, ScrollKind, WheelScroll};
-use crate::sidebar::{Sidebar, display_path};
+use crate::sidebar::{Root, Sidebar, display_path};
 
 use super::comment_view::render_comment_editor;
 use super::comments::{CommentAnchor, CommentStore, reanchor, review_text};
@@ -188,9 +188,9 @@ pub(super) struct FilesMode {
     label: String,
     /// A commit snapshot: no staging or discard actions.
     read_only: bool,
-    /// The commit a snapshot shows, for its header.
-    commit: Option<git::Commit>,
-    /// Show the whole snapshot: the commit's header and every file,
+    /// The commits a snapshot shows, newest first, for its header.
+    commits: Vec<git::Commit>,
+    /// Show the whole snapshot: the commits' header and every file,
     /// whatever the sidebar selects.
     whole: bool,
 }
@@ -247,6 +247,7 @@ impl FilesMode {
         focused: bool,
     ) {
         self.diff_rect = right;
+        self.sync_header();
         let spec = self.panes.view(self.selection(), self.column);
         let pane = match spec.column {
             Column::Staged => &mut self.staged,
@@ -362,7 +363,7 @@ impl FilesMode {
             hide_low_hunks: false,
             label: "Files".to_string(),
             read_only: false,
-            commit: None,
+            commits: Vec::new(),
             whole: false,
         };
         mode.start_review();
@@ -403,12 +404,29 @@ impl FilesMode {
         }
     }
 
-    /// Show the whole snapshot, as `git show` does: the commit's header
+    /// Show the whole snapshot, as `git show` does: the commits' header
     /// above every file's diff. Off, the diff follows the sidebar.
     pub(super) fn show_whole(&mut self, whole: bool) {
         self.whole = whole;
-        let header = self.commit.clone().filter(|_| whole);
-        self.staged.set_header(header.clone());
+    }
+
+    /// Show `commits` as a snapshot: a root row for `root` tops the file
+    /// tree, selected, and while it is selected the diff shows the
+    /// commits' header and no files.
+    pub(super) fn show_snapshot(&mut self, root: Root, commits: Vec<git::Commit>) {
+        self.sidebar.set_root(root);
+        self.commits = commits;
+    }
+
+    /// Top both panes with the commits' header while the whole snapshot
+    /// or the root row shows, and with nothing otherwise.
+    fn sync_header(&mut self) {
+        let header: &[git::Commit] = if self.whole || self.sidebar.root_selected() {
+            &self.commits
+        } else {
+            &[]
+        };
+        self.staged.set_header(header);
         self.unstaged.set_header(header);
     }
 
@@ -439,6 +457,7 @@ impl FilesMode {
     }
 
     fn rebuild_sidebar(&mut self, height: usize) {
+        let root = self.sidebar.root_selected();
         let directory = self.sidebar.selected_directory_path();
         let file = self.sidebar.nearest_file_index();
         let folds = self.sidebar.folds();
@@ -447,7 +466,10 @@ impl FilesMode {
         let restored = directory
             .as_deref()
             .is_some_and(|path| self.sidebar.select_directory_path(path, height));
-        if !restored && let Some(index) = file {
+        if !root
+            && !restored
+            && let Some(index) = file
+        {
             self.sidebar.select_file_index(index, height);
         }
         self.sidebar.update_notes(&self.guidance.rows);
@@ -523,6 +545,7 @@ impl FilesMode {
         theme: &Theme,
         budget: DrawBudget,
     ) {
+        self.sync_header();
         let spec = self.panes.view(self.selection(), self.column);
         if spec.column != column {
             return;
@@ -848,9 +871,12 @@ fn handle_key(state: &mut FilesMode, key: KeyCode, height: usize) -> AppCommand 
             state.toggle_column();
             AppCommand::Continue
         }
-        // Enter on a file opens its diff; on a directory it folds.
+        // Enter on a file or the root row opens its diff; on a directory
+        // it folds.
         KeyCode::Enter
-            if state.focus == Focus::Sidebar && state.sidebar.selected_file_index().is_some() =>
+            if state.focus == Focus::Sidebar
+                && (state.sidebar.selected_file_index().is_some()
+                    || state.sidebar.root_selected()) =>
         {
             state.focus = Focus::Diff;
             AppCommand::Continue
@@ -1623,24 +1649,8 @@ mod tests {
     #[test]
     fn a_whole_commit_shows_its_header_above_every_file() {
         let mut state = make_state_with_rects(&[edited("a.rs"), edited("b.rs")]);
-        state.commit = Some(git::Commit {
-            id: "c4b48c0d58e6c879f3e5287150a98f32e4a81f76".into(),
-            short_id: "c4b48c0".into(),
-            summary: "fit the help row".into(),
-            message: "fit the help row".into(),
-            author: "Ada".into(),
-            email: "ada@example.com".into(),
-            time: 0,
-        });
-        let rows = |state: &mut FilesMode| -> Vec<String> {
-            rebuild_window(state);
-            state
-                .unstaged
-                .rows()
-                .iter()
-                .map(|row| line_text(&row.line))
-                .collect()
-        };
+        state.commits = vec![test_commit("c4b48c0", "fit the help row")];
+        let rows = assembled_text;
         let at = |rows: &[String], text: &str| rows.iter().position(|row| row.contains(text));
 
         state.show_whole(true);
@@ -1657,6 +1667,116 @@ mod tests {
         assert_eq!(at(&one, "commit c4b48c0"), None, "{one:#?}");
         assert!(at(&one, "a.rs").is_some(), "{one:#?}");
         assert_eq!(at(&one, "b.rs"), None, "{one:#?}");
+    }
+
+    fn test_commit(short_id: &str, message: &str) -> git::Commit {
+        git::Commit {
+            id: format!("{short_id}d58e6c879f3e5287150a98f32e4a81f76"),
+            short_id: short_id.into(),
+            summary: message.lines().next().unwrap_or_default().into(),
+            message: message.into(),
+            author: "Ada".into(),
+            email: "ada@example.com".into(),
+            time: 0,
+        }
+    }
+
+    /// The unstaged window's rows as text, re-assembled as a draw does.
+    fn assembled_text(state: &mut FilesMode) -> Vec<String> {
+        rebuild_window(state);
+        state
+            .unstaged
+            .rows()
+            .iter()
+            .map(|row| line_text(&row.line))
+            .collect()
+    }
+
+    /// A commit snapshot of `a.rs` and `b.rs`, whose message is `message`.
+    fn commit_snapshot(message: &str) -> FilesMode {
+        let mut state = make_state_with_rects(&[edited("a.rs"), edited("b.rs")]);
+        let commit = test_commit("c4b48c0", message);
+        let root = Root::Commit {
+            subject: commit.summary.clone(),
+        };
+        state.show_snapshot(root, vec![commit]);
+        state
+    }
+
+    #[test]
+    fn the_root_row_shows_the_commit_header_and_no_files() {
+        let mut state = commit_snapshot("fit the help row\n\nIt wrapped.\n");
+
+        let header = assembled_text(&mut state);
+        assert_eq!(header[0], "commit c4b48c0d58e6c879f3e5287150a98f32e4a81f76");
+        assert!(
+            header.iter().any(|row| row.contains("It wrapped.")),
+            "{header:#?}"
+        );
+        assert!(
+            !header.iter().any(|row| row.contains("a.rs")),
+            "{header:#?}"
+        );
+        assert!(
+            !header.iter().any(|row| row.contains("const x")),
+            "{header:#?}"
+        );
+
+        handle_key(&mut state, KeyCode::Char('j'), 18);
+        let file = assembled_text(&mut state);
+        assert!(
+            !file.iter().any(|row| row.starts_with("commit ")),
+            "{file:#?}"
+        );
+        assert!(file.iter().any(|row| row.contains("a.rs")), "{file:#?}");
+
+        handle_key(&mut state, KeyCode::Char('k'), 18);
+        assert_eq!(assembled_text(&mut state), header);
+    }
+
+    #[test]
+    fn a_branch_root_row_shows_every_commit_header_newest_first() {
+        let mut state = make_state_with_rects(&[edited("a.rs")]);
+        let root = Root::Branch {
+            name: "upper".into(),
+            commits: 2,
+        };
+        state.show_snapshot(
+            root,
+            vec![
+                test_commit("2222222", "finish upper"),
+                test_commit("1111111", "draft upper"),
+            ],
+        );
+
+        let rows = assembled_text(&mut state);
+        let at = |text: &str| rows.iter().position(|row| row.contains(text));
+        assert!(at("finish upper") < at("draft upper"), "{rows:#?}");
+        assert!(at("draft upper").is_some(), "{rows:#?}");
+        assert_eq!(at("const x"), None, "{rows:#?}");
+    }
+
+    #[test]
+    fn enter_on_the_root_row_focuses_a_header_that_j_scrolls() {
+        let body: Vec<String> = (1..=40).map(|n| format!("note {n:02}")).collect();
+        let mut state = commit_snapshot(&format!("subject\n\n{}", body.join("\n")));
+        assembled_text(&mut state);
+
+        handle_key(&mut state, KeyCode::Enter, 18);
+        assert_eq!(state.focus, Focus::Diff);
+        handle_key(&mut state, KeyCode::Char('j'), 18);
+
+        assert_eq!(state.unstaged.cursor.scroll, 1);
+    }
+
+    #[test]
+    fn filtering_files_keeps_the_root_row_selected() {
+        let mut state = commit_snapshot("fit the help row");
+
+        handle_key(&mut state, KeyCode::Char('f'), 18);
+
+        assert!(state.sidebar.root_selected());
+        assert!(assembled_text(&mut state)[0].starts_with("commit "));
     }
 
     fn diff_state(files: &[ResolvedFile]) -> FilesMode {
