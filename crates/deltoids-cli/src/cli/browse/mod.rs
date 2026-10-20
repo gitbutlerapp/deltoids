@@ -74,6 +74,7 @@ mod workspace;
 use command::{CustomCommand, load_commands};
 use events::read_event_burst;
 use files::FilesMode;
+use help::{HelpKey, HelpPopup};
 use mode::{AppCommand, CustomRun, DrawBudget, Mode, Viewport};
 use sidebar_width::Preference;
 use terminal::TerminalSession;
@@ -179,7 +180,6 @@ fn draw_frame(
     shell: &mut Shell,
     theme: &Theme,
 ) -> Result<Viewport, String> {
-    let help_visible = shell.help_visible;
     let pref = shell.sidebar_pref;
     let layout = shell.change_layout;
     // Until the mode is built, draw a loading frame so the UI responds
@@ -191,6 +191,7 @@ fn draw_frame(
     let theme_picker = shell.theme_picker.as_ref();
     let active_theme = shell.syntax_theme.as_str();
     let refresh_error = shell.refresh_error();
+    let help = shell.help.as_mut();
     let area = terminal
         .draw(|frame| {
             let area = frame.area();
@@ -204,13 +205,13 @@ fn draw_frame(
             } else {
                 mode.draw(frame, cols[0], cols[1], layout, theme, budget);
             }
-            if help_visible {
+            if let Some(help) = help {
                 let commands: Vec<_> = commands
                     .iter()
                     .filter(|c| !mode.reserves_key(KeyCode::Char(c.key)))
                     .cloned()
                     .collect();
-                help::draw_help_popup(frame, area, theme, &commands);
+                help.draw(frame, area, theme, &commands);
             }
             if let Some(picker) = theme_picker {
                 theme_picker::draw(frame, area, theme, picker, active_theme);
@@ -296,8 +297,8 @@ struct Shell {
     sidebar_pref: Preference,
     /// True while the left button is held on the pane divider.
     dragging_divider: bool,
-    /// Whether the help popup is shown.
-    help_visible: bool,
+    /// The help popup, while it is open.
+    help: Option<HelpPopup>,
     /// Open syntax-theme picker, or `None` when closed.
     theme_picker: Option<ThemePicker>,
     /// Current syntax-theme name (mirrors the shared `Theme`'s
@@ -348,7 +349,7 @@ impl Shell {
         Self {
             sidebar_pref,
             dragging_divider: false,
-            help_visible: false,
+            help: None,
             theme_picker: None,
             syntax_theme,
             change_layout: ChangeLayout::Grouped,
@@ -622,8 +623,11 @@ impl Shell {
         if key == KeyCode::Char('q') {
             return AppCommand::Quit;
         }
-        if self.help_visible {
-            return help::handle_key_help(&mut self.help_visible, key);
+        if let Some(help) = self.help.as_mut() {
+            if help.handle_key(key) == HelpKey::Close {
+                self.help = None;
+            }
+            return AppCommand::Continue;
         }
         // The theme picker is modal: while open it owns every key (except
         // the `q` quit handled above), so navigation never leaks to the mode.
@@ -632,7 +636,7 @@ impl Shell {
         }
         match key {
             KeyCode::Char('?') => {
-                self.help_visible = true;
+                self.help = Some(HelpPopup::default());
                 AppCommand::Continue
             }
             // `t` opens the syntax-theme picker, seeded at the current theme.
@@ -711,7 +715,11 @@ impl Shell {
         mouse: MouseEvent,
         height: usize,
     ) -> AppCommand {
-        if self.help_visible || self.theme_picker.is_some() {
+        if let Some(help) = self.help.as_mut() {
+            help.handle_mouse(mouse.kind);
+            return AppCommand::Continue;
+        }
+        if self.theme_picker.is_some() {
             return AppCommand::Continue;
         }
         if mode.captures_text_input() {

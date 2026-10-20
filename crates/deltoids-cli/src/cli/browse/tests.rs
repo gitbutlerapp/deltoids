@@ -241,13 +241,13 @@ fn question_mark_toggles_help_and_help_swallows_keys() {
     let (mut mode, files_rec) = one_mode();
     let mut s = shell();
     s.handle_key(&mut mode, KeyCode::Char('?'), 4);
-    assert!(s.help_visible);
+    assert!(s.help.is_some());
 
     // While help is up, Esc closes the popup and does not reach the
     // active mode.
     let cmd = s.handle_key(&mut mode, KeyCode::Esc, 4);
     assert_eq!(cmd, AppCommand::Continue);
-    assert!(!s.help_visible);
+    assert!(s.help.is_none());
     assert!(files_rec.borrow().keys.is_empty());
 }
 
@@ -294,7 +294,7 @@ fn q_quits_even_with_the_help_popup_open() {
     let (mut mode, _) = one_mode();
     let mut s = shell();
     s.handle_key(&mut mode, KeyCode::Char('?'), 4);
-    assert!(s.help_visible);
+    assert!(s.help.is_some());
     assert_eq!(
         s.handle_key(&mut mode, KeyCode::Char('q'), 4),
         AppCommand::Quit
@@ -594,7 +594,7 @@ fn capturing_mode_receives_every_key_including_globals() {
     }
 
     assert_eq!(files_rec.borrow().keys.len(), 6);
-    assert!(!s.help_visible, "the help popup never opened");
+    assert!(s.help.is_none(), "the help popup never opened");
 }
 
 #[test]
