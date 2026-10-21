@@ -104,6 +104,42 @@ impl Model {
         self.files.len() - 1
     }
 
+    /// Drop the visited files at `paths`. Returns, for every file that
+    /// stays, its old index and its new one.
+    pub(super) fn unvisit(&mut self, paths: &[String]) -> HashMap<usize, usize> {
+        let first = self.changed_files();
+        let dropped: Vec<usize> = (first..self.files.len())
+            .filter(|&index| {
+                paths
+                    .iter()
+                    .any(|path| path == display_path(&self.files[index].file))
+            })
+            .collect();
+        let mut moved = HashMap::new();
+        let mut next = 0;
+        for index in 0..self.files.len() {
+            if !dropped.contains(&index) {
+                moved.insert(index, next);
+                next += 1;
+            }
+        }
+        for &index in dropped.iter().rev() {
+            self.files.remove(index);
+            self.bodies.remove(index);
+            self.splits.remove(index);
+            self.visited -= 1;
+        }
+        moved
+    }
+
+    /// The paths of the changed files, leaving visited files out.
+    pub(super) fn changed_paths(&self) -> HashSet<String> {
+        self.files[..self.changed_files()]
+            .iter()
+            .map(|resolved| display_path(&resolved.file).to_string())
+            .collect()
+    }
+
     /// Whether file `index` is a visited file, not a change.
     pub(super) fn is_visited(&self, index: usize) -> bool {
         index >= self.changed_files() && index < self.files.len()

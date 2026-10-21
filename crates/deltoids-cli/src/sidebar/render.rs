@@ -223,7 +223,7 @@ pub fn render_note(
 }
 
 /// An unchanged file a jump opened: a muted `○` where the status goes,
-/// the name in italics, and a muted "visited" where the counts go.
+/// the name in italics, and no counts.
 fn visited_row_spans(
     spans: &mut Vec<Span<'static>>,
     name: &str,
@@ -243,7 +243,6 @@ fn visited_row_spans(
         name.to_string(),
         base.add_modifier(Modifier::ITALIC),
     ));
-    spans.push(Span::styled(" visited".to_string(), muted));
 }
 
 #[allow(clippy::too_many_arguments)]

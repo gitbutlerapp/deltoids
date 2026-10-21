@@ -1378,19 +1378,29 @@ impl Mode for FilesMode {
             return Ok(false);
         };
         // `vcs` borrows `self.vcs`; the rest are disjoint fields.
+        // Visited files outlive edits to the changed files, not a change
+        // to which files those are (a commit, a new file, a discard).
         let nav = &self.nav;
+        let before = self.model.changed_paths();
         let outcome = reload_working_tree(
             [&mut self.staged, &mut self.unstaged],
             &mut self.sidebar,
             &mut self.model,
             &mut self.last_input,
             vcs,
-            &|model| nav.revisit(model),
+            &|model| {
+                if model.changed_paths() == before {
+                    nav.revisit(model);
+                }
+            },
             theme,
             viewport.height,
         );
         if outcome == ReloadOutcome::Rebuilt {
             navigate::cancel(self);
+            if self.model.changed_paths() != before {
+                self.nav.forget_trail();
+            }
             self.nav.sync(&self.model);
         }
         self.reload_failed = matches!(outcome, ReloadOutcome::Failed(_));

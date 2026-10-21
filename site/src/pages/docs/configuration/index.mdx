@@ -55,7 +55,9 @@ the working tree, and on the lines of a commit or branch that have not
 changed since (deltoids follows them when lines above moved).
 Answers inside the diff move the cursor there; a line outside the shown
 hunks opens its hunk, and a file the diff does not touch opens as a
-*visited* file.
+*visited* file, marked `○` in the sidebar. A visited file goes away when
+`Ctrl+o` goes back past it, or when the diff holds other files (after a
+commit, for example).
 
 deltoids looks for these servers on `PATH`:
 

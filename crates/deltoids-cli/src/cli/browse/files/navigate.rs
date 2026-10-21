@@ -184,6 +184,15 @@ impl Navigation {
         Some((self.lsp.clone()?, self.root.clone()?))
     }
 
+    /// Forget the jump trail and the visited files it opened: the diff
+    /// now holds other files, so the trail leads through a review that
+    /// is over.
+    pub(super) fn forget_trail(&mut self) {
+        self.visited.clear();
+        self.back.clear();
+        self.list = None;
+    }
+
     /// Add every visited file that is not part of `model` back to it,
     /// read again from disk, after a rebuild.
     pub(super) fn revisit(&self, model: &mut Model) {
@@ -517,6 +526,7 @@ pub(super) fn back(state: &mut FilesMode) {
         return;
     };
     let sidebar_height = sidebar_height(state);
+    drop_unreachable_visits(state, &origin, sidebar_height);
     if state.hide_low != origin.hide_low {
         state.hide_low = origin.hide_low;
         state.rebuild_sidebar(sidebar_height);
@@ -777,6 +787,44 @@ fn jump(state: &mut FilesMode, landing: Landing, target: CommentAnchor) {
     state.nav.picked = None;
     let height = diff_height(state);
     state.pane_mut(landing.column).jump_to(target, height);
+}
+
+/// Drop the visited files no jump leads back to once `Ctrl+o` returns to
+/// `origin`: they were detours off the trail.
+fn drop_unreachable_visits(state: &mut FilesMode, origin: &Origin, sidebar_height: usize) {
+    let reachable = |path: &String| {
+        state
+            .nav
+            .back
+            .iter()
+            .chain(std::iter::once(origin))
+            .any(|origin| origin.leads_to(path))
+    };
+    let dropped: Vec<String> = state
+        .nav
+        .visited
+        .iter()
+        .filter(|path| !reachable(path))
+        .cloned()
+        .collect();
+    if dropped.is_empty() {
+        return;
+    }
+    state.nav.visited.retain(|path| !dropped.contains(path));
+    let moved = state.model.unvisit(&dropped);
+    state.staged.carry_over(&moved);
+    state.unstaged.carry_over(&moved);
+    state.rebuild_sidebar(sidebar_height);
+}
+
+impl Origin {
+    /// Whether going back to this place shows file `path`.
+    fn leads_to(&self, path: &str) -> bool {
+        self.anchor
+            .as_ref()
+            .is_some_and(|anchor| anchor.path == path)
+            || matches!(&self.selection, Selection::File(file) if file == path)
+    }
 }
 
 fn remember(state: &mut FilesMode) {

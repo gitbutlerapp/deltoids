@@ -428,7 +428,12 @@ fn callers_list_the_diff_first_and_an_outside_caller_opens_as_a_visited_file() {
         Some(("src/report.rs".to_string(), LineSide::New, 4))
     );
     let screen = test_screen::screen(&mut state).join("\n");
-    assert!(screen.contains("report.rs visited"), "{screen}");
+    let sidebar = test_screen::left_text(&mut state);
+    let row = sidebar
+        .lines()
+        .find(|row| row.contains("report.rs"))
+        .unwrap_or_default();
+    assert!(row.contains('○') && !row.contains("visited"), "{row}");
     assert!(screen.contains("Visited file"), "{screen}");
     assert!(screen.contains("not in this diff"), "{screen}");
     assert_eq!(
@@ -442,6 +447,79 @@ fn callers_list_the_diff_first_and_an_outside_caller_opens_as_a_visited_file() {
         cursor(&state),
         Some(("src/cart.rs".to_string(), LineSide::New, 13))
     );
+    assert!(
+        !test_screen::left_text(&mut state).contains("report.rs"),
+        "going back past a visited file drops it"
+    );
+}
+
+#[test]
+fn visited_files_stay_through_edits_and_go_when_the_diff_holds_other_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init_repo(dir.path());
+    for (path, text) in [
+        ("src/main.rs", MAIN_BEFORE),
+        ("src/cart.rs", CART_BEFORE),
+        ("src/report.rs", REPORT),
+    ] {
+        let full = dir.path().join(path);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, text).unwrap();
+    }
+    stage_all(&repo);
+    commit_index(&repo, "initial");
+    fs::write(dir.path().join("src/main.rs"), MAIN_AFTER).unwrap();
+    fs::write(dir.path().join("src/cart.rs"), CART_AFTER).unwrap();
+
+    store_blobs(dir.path());
+    let vcs = Vcs::discover_at(dir.path()).unwrap();
+    let (input, model) = FilesMode::try_model(&vcs).unwrap();
+    let mut state = FilesMode::new(model, input, Some(vcs), &theme(), 80);
+    let root = dir.path().to_path_buf();
+    let uri = move |path: &str| {
+        url::Url::from_file_path(root.join(path))
+            .unwrap()
+            .to_string()
+    };
+    let (lsp, _) = fake::lsp(
+        dir.path(),
+        json!({ "positionEncoding": "utf-8", "callHierarchyProvider": true }),
+        shop_server(&uri),
+    );
+    state.nav = Navigation::new(Some(lsp), Some(dir.path().to_path_buf()));
+    let reload = |state: &mut FilesMode| {
+        store_blobs(dir.path());
+        let viewport = Viewport {
+            height: PANE_HEIGHT,
+            diff_width: 80,
+        };
+        Mode::reload(state, viewport, &theme()).unwrap();
+        test_screen::screen(state);
+    };
+    let sidebar_has_report =
+        |state: &mut FilesMode| test_screen::left_text(state).contains("report.rs");
+
+    open(&mut state, "src/cart.rs");
+    cursor_to(&mut state, "src/cart.rs", LineSide::New, 13);
+    press(&mut state, KeyCode::Char('r'));
+    press(&mut state, KeyCode::Char('j'));
+    press(&mut state, KeyCode::Enter);
+    assert!(sidebar_has_report(&mut state));
+
+    fs::write(
+        dir.path().join("src/cart.rs"),
+        CART_AFTER.replace("/ 10", "/ 20"),
+    )
+    .unwrap();
+    reload(&mut state);
+    assert!(sidebar_has_report(&mut state), "an edit keeps it");
+
+    git_cli(dir.path(), &["add", "src/main.rs"]);
+    git_cli(dir.path(), &["commit", "-qm", "main"]);
+    reload(&mut state);
+    assert!(!sidebar_has_report(&mut state), "a commit drops it");
+    ctrl_o(&mut state);
+    assert!(right(&mut state).contains("No earlier place to go back to"));
 }
 
 #[test]
@@ -598,6 +676,22 @@ fn header(state: &mut FilesMode, path: &str) -> String {
         .find(|row| row.contains(path))
         .unwrap_or_default()
         .to_string()
+}
+
+/// Store the working tree's changed files as blobs, so content
+/// resolution does not depend on the process cwd shared by parallel
+/// tests, as the interaction tests do.
+fn store_blobs(dir: &std::path::Path) {
+    let raw = git2::Repository::open(dir).unwrap();
+    let vcs = Vcs::discover_at(dir).unwrap();
+    let stages = vcs.repo().working_tree_snapshot().unwrap().stages;
+    for bytes in stages
+        .into_iter()
+        .flat_map(|status| status.paths)
+        .filter_map(|path| fs::read(dir.join(path)).ok())
+    {
+        raw.blob(&bytes).unwrap();
+    }
 }
 
 /// Show `path`'s diff without waiting for background work to settle,
