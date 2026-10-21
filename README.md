@@ -148,11 +148,11 @@ Without the key, the sidebar shows no guidance.
 ### Language servers
 
 Press `Enter` on a diff line in `deltoids tui` to go to the definition of
-the underlined symbol, and `r` to list a function's callers (`w` / `b`
-pick another symbol on the line; `Ctrl+o` goes back). On a definition,
-`Enter` lists its callers instead. A language server
-answers. deltoids starts it as soon as a file in its language shows in
-the diff pane and stops it on quit. The diff pane's top border names the
+the underlined symbol, or `r` to list a function's callers. `w` / `b` pick
+another symbol on the line, and `Ctrl+o` goes back. On a definition,
+`Enter` lists its callers instead. A language server answers: deltoids
+starts it as soon as a file in its language shows in the diff pane and
+stops it on quit. The diff pane's top border names the
 file under the cursor and, at the right, its language and the server's
 state: `Rust ●` ready, a spinner (with a percentage when the server
 reports one) while it starts or indexes, `✕` when it failed, nothing
@@ -169,20 +169,22 @@ commit, for example).
 
 deltoids looks for these servers on `PATH`:
 
-| Language | Server |
-| --- | --- |
-| Rust | `rust-analyzer` |
-| Go | `gopls` |
-| TypeScript, TSX, JavaScript | `typescript-language-server --stdio` |
-| Python | `pyright-langserver --stdio` |
-| C, C++ | `clangd` |
-| Ruby | `ruby-lsp` |
-| Lua | `lua-language-server` |
-| Bash | `bash-language-server start` |
-| Java | `jdtls` |
-| Kotlin | `kotlin-language-server` |
+| Language | Name in `[lsp.<name>]` | Server |
+| --- | --- | --- |
+| Rust | `rust` | `rust-analyzer` |
+| Go | `go` | `gopls` |
+| TypeScript, TSX, JavaScript | `typescript`, `tsx`, `javascript` | `typescript-language-server --stdio` |
+| Python | `python` | `pyright-langserver --stdio` |
+| C, C++ | `c`, `cpp` | `clangd` |
+| Ruby | `ruby` | `ruby-lsp` |
+| Lua | `lua` | `lua-language-server` |
+| Bash | `bash` | `bash-language-server start` |
+| Java | `java` | `jdtls` |
+| Kotlin | `kotlin` | `kotlin-language-server` |
 
-A `[lsp.<language>]` table replaces a server or turns it off:
+An `[lsp.<name>]` table replaces a server or turns it off. The other
+languages deltoids understands (`css`, `hcl`, `json`, `markdown`,
+`sql`, `toml`, `yaml`) can get a server the same way:
 
 ```toml
 [lsp.python]
