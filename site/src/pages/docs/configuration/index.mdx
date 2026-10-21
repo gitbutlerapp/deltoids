@@ -45,10 +45,11 @@ the underlined symbol, and `r` to list a function's callers (`w` / `b`
 pick another symbol on the line; `Ctrl+o` goes back). On a definition,
 `Enter` lists its callers instead. A language server
 answers. deltoids starts it as soon as a file in its language shows in
-the diff pane and stops it on quit. Each file header shows the server's
-state left of the language name: `●` ready, a spinner (with a
-percentage when the server reports one) while it starts or indexes, `✕`
-when it failed, nothing when there is no server.
+the diff pane and stops it on quit. The diff pane's top border names the
+file under the cursor and, at the right, its language and the server's
+state: `Rust ●` ready, a spinner (with a percentage when the server
+reports one) while it starts or indexes, `✕` when it failed, nothing
+when there is no server.
 
 The server reads the files on disk, so navigation works on every line of
 the working tree, and on the lines of a commit or branch that have not

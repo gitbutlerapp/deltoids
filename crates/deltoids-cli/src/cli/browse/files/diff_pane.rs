@@ -32,7 +32,6 @@ use crate::cli::browse::diff_cursor::{
 use crate::cli::browse::diff_scrollbar;
 use crate::cli::browse::mode::{DrawBudget, layout_label};
 use crate::cli::browse::panel::draw_filter_flag;
-use crate::cli::browse::syntax_badge::with_syntax_badge;
 use crate::cli::browse::text::{display_width, wrap_text};
 use crate::sidebar::{
     FileMode, IconMode, ModeChange, RowNote, display_path, file_metadata, render_note, symlink_icon,
@@ -140,18 +139,9 @@ pub(super) fn render_file_block(
         },
     };
     let path = display_path(file);
-    let mut rows: Vec<DiffRow> = file_header(file, body, width, theme)
-        .into_iter()
-        .map(DiffRow::plain)
-        .collect();
-
-    if let Some(old_path) = &file.rename_from {
-        rows.push(DiffRow::plain(render_tui::render_rename_header(
-            old_path,
-            &file.new_path,
-            theme,
-        )));
-    }
+    // The file's name lives on the pane's border, and on a divider row
+    // when the window shows several files (see `file_divider`).
+    let mut rows: Vec<DiffRow> = Vec::new();
     // A type change renders as a content diff, but its note box stands in
     // for the per-hunk line-number box: render the note box, then the hunk
     // bodies without their own boxes (avoiding a second, redundant box).
@@ -505,46 +495,109 @@ fn line_ends_with(line: &Line<'_>, end: char) -> bool {
         .is_some_and(|span| span.content.ends_with(end))
 }
 
-/// The file header, with the syntax badge on the path line for a text diff.
-fn file_header(
-    file: &FileDiff,
-    body: &FileBody,
-    width: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let path = display_path(file);
-    let mut lines = render_tui::render_file_header(path, width, theme);
-    if let FileBody::Diff(diff) = body {
-        lines[0] = with_syntax_badge(
-            lines[0].clone(),
-            diff.language(),
-            diff.highlight(),
-            path,
-            width,
-            theme,
-        );
-    }
-    lines
+/// The row that starts a file in a window of several: a rule with the
+/// file's name in it, `○` first for a visited file, `old → new` for a
+/// rename.
+fn file_divider(model: &Model, index: usize, width: usize, theme: &Theme) -> Line<'static> {
+    let rule = Style::default().fg(rgb_to_color(theme.separator));
+    let label = file_label(model, index);
+    let used = 4 + display_width(&label);
+    Line::from(vec![
+        Span::styled("── ", rule),
+        Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {}", "─".repeat(width.saturating_sub(used))), rule),
+    ])
 }
 
-/// Cheap stand-in for a not-yet-highlighted file: the file header (and any
-/// rename header) plus a muted "Rendering…" line. No syntect, so holding
+/// How a file is named on the border and on its divider.
+fn file_label(model: &Model, index: usize) -> String {
+    let file = &model.files[index].file;
+    let path = match &file.rename_from {
+        Some(old) => format!("{old} \u{2192} {}", file.new_path),
+        None => display_path(file).to_string(),
+    };
+    if model.is_visited(index) {
+        format!("\u{25cb} {path}")
+    } else {
+        path
+    }
+}
+
+/// The pane's title naming file `index`: `─[0] path ─`, with the
+/// staging tabs when the selection has both columns. The label shortens
+/// from the left, `…/files/navigate.rs`, to stay within `budget` columns.
+pub(super) fn file_heading(
+    model: &Model,
+    index: usize,
+    title: PaneTitle,
+    budget: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let tabs = match title {
+        PaneTitle::Both(shown) => Some(shown),
+        _ => None,
+    };
+    let tabs_width = if tabs.is_some() { 22 } else { 0 };
+    let room = budget.saturating_sub(7 + tabs_width);
+    let mut spans = vec![
+        Span::raw("─[0] "),
+        Span::styled(
+            shorten_left(&file_label(model, index), room),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(shown) = tabs {
+        spans.push(Span::raw(" · "));
+        spans.extend(column_tabs(shown, theme));
+    }
+    spans.push(Span::raw(" ─"));
+    Line::from(spans)
+}
+
+/// `text` cut to `width` columns from the left, with `…` in front when
+/// it was cut.
+fn shorten_left(text: &str, width: usize) -> String {
+    if display_width(text) <= width {
+        return text.to_string();
+    }
+    let mut kept: Vec<char> = Vec::new();
+    let mut used = 1;
+    for ch in text.chars().rev() {
+        let w = display_width(&ch.to_string());
+        if used + w > width {
+            break;
+        }
+        used += w;
+        kept.push(ch);
+    }
+    std::iter::once('\u{2026}')
+        .chain(kept.into_iter().rev())
+        .collect()
+}
+
+/// `Staged - Unstaged`, with `shown` in the accent.
+fn column_tabs(shown: Column, theme: &Theme) -> Vec<Span<'static>> {
+    let active = Style::default()
+        .fg(rgb_to_color(theme.border_active))
+        .add_modifier(Modifier::BOLD);
+    let inactive = Style::default().fg(Color::Reset);
+    let tab = |column: Column, label: &'static str| {
+        let style = if column == shown { active } else { inactive };
+        Span::styled(label, style)
+    };
+    vec![
+        tab(Column::Staged, "Staged"),
+        Span::styled(" - ", inactive),
+        tab(Column::Unstaged, "Unstaged"),
+    ]
+}
+
+/// Cheap stand-in for a not-yet-highlighted file: any type-change note
+/// plus a muted "Rendering…" line. No syntect, so holding
 /// `j` across many files never blocks. Its height is fixed and known, so
 /// the assembled window has a definite length every frame.
-fn placeholder_file_block(
-    file: &FileDiff,
-    body: &FileBody,
-    width: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let mut lines = file_header(file, body, width, theme);
-    if let Some(old_path) = &file.rename_from {
-        lines.push(render_tui::render_rename_header(
-            old_path,
-            &file.new_path,
-            theme,
-        ));
-    }
+fn placeholder_file_block(file: &FileDiff, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("")];
     if let Some(note) = typechange_note(file, theme) {
         lines.push(Line::from(""));
         lines.extend(note);
@@ -642,6 +695,9 @@ pub(super) struct DiffPane {
     header: Vec<git::Commit>,
     /// Low-value hunks are collapsed; the title says so.
     hide_low: bool,
+    /// The title naming the current file, set before each render; the
+    /// pane's own title when `None`.
+    heading: Option<Line<'static>>,
 }
 
 impl DiffPane {
@@ -665,7 +721,59 @@ impl DiffPane {
             empty_state: EmptyPane::NoChanges,
             header: Vec::new(),
             hide_low: false,
+            heading: None,
         }
+    }
+
+    /// Title the next render with `heading` (the current file), or with
+    /// the pane's own title for `None`.
+    pub(super) fn set_heading(&mut self, heading: Option<Line<'static>>) {
+        self.heading = heading;
+    }
+
+    /// Settle what a render of `area` will show: land on the first hunk
+    /// of a newly visited file, bring a moved cursor back into view, and
+    /// clamp the scroll. [`DiffPane::render`] does this too; calling it
+    /// first lets the caller ask what will be on screen.
+    pub(super) fn settle(&mut self, area: Rect) {
+        if self.empty {
+            return;
+        }
+        let viewport = diff_scrollbar::body_area(area).height as usize;
+        if self.landing && self.window_complete {
+            self.landing = false;
+            if let Some((scroll, row)) = land(&self.window, viewport) {
+                select_row(&self.window, row, &mut self.cursor);
+                self.cursor_ready = true;
+                self.cursor.scroll = scroll;
+            }
+        }
+        if self.cursor_ready
+            && self
+                .window
+                .get(self.cursor.row)
+                .is_some_and(DiffRow::is_selectable)
+            && std::mem::take(&mut self.reveal_cursor)
+        {
+            keep_visible(&mut self.cursor, viewport.max(1));
+        }
+        self.cursor.scroll = self.cursor.scroll.min(self.max_scroll(viewport));
+    }
+
+    /// The file the pane is on in `area`: the cursor's when its line is
+    /// on screen, otherwise the one at the top of the viewport.
+    pub(super) fn current_file(&self, model: &Model, area: Rect) -> Option<usize> {
+        if self.empty {
+            return None;
+        }
+        let height = diff_scrollbar::body_area(area).height as usize;
+        let on_screen =
+            self.cursor.row >= self.cursor.scroll && self.cursor.row < self.cursor.scroll + height;
+        let cursor_file = self
+            .cursor_anchor()
+            .filter(|_| on_screen)
+            .and_then(|anchor| model.index_of(&anchor.path));
+        cursor_file.or_else(|| self.top_file().map(|(file, _)| file))
     }
 
     /// Top the window with each of `commits`' headers, scrolling with the
@@ -803,15 +911,7 @@ impl DiffPane {
             return;
         }
 
-        let mut window = self.header_rows(width, theme);
-        let mut starts = Vec::new();
-        for (i, input_idx) in files.into_iter().enumerate() {
-            if i > 0 {
-                window.push(DiffRow::plain(Line::from("")));
-            }
-            starts.push((input_idx, window.len()));
-            window.extend(self.file_block(input_idx, model, key.epoch, theme, comments, labels));
-        }
+        let (window, starts) = self.build_window(&files, model, key.epoch, theme, comments, labels);
         if let Some((file, offset)) = old_top {
             match starts.iter().find(|(index, _)| *index == file) {
                 Some((_, start)) => self.cursor.scroll = start + offset,
@@ -845,6 +945,39 @@ impl DiffPane {
         self.window_key = Some(key);
     }
 
+    /// The window's rows: the commit header, then \`files\`' blocks, each
+    /// after a divider naming it when the window holds more than one file
+    /// (or a commit header). Also where each file starts.
+    fn build_window(
+        &self,
+        files: &[usize],
+        model: &Model,
+        epoch: CacheEpoch,
+        theme: &Theme,
+        comments: &CommentStore,
+        labels: &HunkLabels<'_>,
+    ) -> (Vec<DiffRow>, Vec<(usize, usize)>) {
+        let mut window = self.header_rows(epoch.width, theme);
+        let dividers = files.len() > 1 || !self.header.is_empty();
+        let mut starts = Vec::with_capacity(files.len());
+        for (i, &index) in files.iter().enumerate() {
+            if i > 0 {
+                window.push(DiffRow::plain(Line::from("")));
+            }
+            starts.push((index, window.len()));
+            if dividers {
+                window.push(DiffRow::plain(file_divider(
+                    model,
+                    index,
+                    epoch.width,
+                    theme,
+                )));
+            }
+            window.extend(self.file_block(index, model, epoch, theme, comments, labels));
+        }
+        (window, starts)
+    }
+
     /// The border with its title, flagged while low-value hunks are
     /// collapsed.
     fn draw_border(
@@ -855,7 +988,11 @@ impl DiffPane {
         footer: Option<Line<'static>>,
         theme: &Theme,
     ) {
-        let block = pane_block_with_title_line(heading(self.title, theme), color, footer);
+        let title = match &self.heading {
+            Some(heading) if !self.empty => heading.clone(),
+            _ => heading(self.title, theme),
+        };
+        let block = pane_block_with_title_line(title, color, footer);
         frame.render_widget(block, area);
         if self.hide_low {
             draw_filter_flag(frame, area, theme);
@@ -955,25 +1092,6 @@ impl DiffPane {
         (offset < body.height as usize).then_some((body, offset))
     }
 
-    /// The body rect inside `area` and, for each file header on screen,
-    /// its file and screen row. Valid after [`DiffPane::render`] into
-    /// `area`.
-    pub(super) fn file_headers(&self, area: Rect) -> (Rect, Vec<(usize, u16)>) {
-        let body = diff_scrollbar::body_area(area);
-        if self.empty {
-            return (body, Vec::new());
-        }
-        let headers = self
-            .file_starts
-            .iter()
-            .filter_map(|&(file, start)| {
-                let offset = start.checked_sub(self.cursor.scroll)?;
-                (offset < body.height as usize).then_some((file, body.y + offset as u16))
-            })
-            .collect();
-        (body, headers)
-    }
-
     /// The diff line drawn on window row `row`: the row its first row
     /// sits on, the file line it draws, and which wrapped row of it
     /// `row` is.
@@ -1018,7 +1136,7 @@ impl DiffPane {
             rows
         } else {
             let view = model.view(input_idx, self.column);
-            placeholder_file_block(view.file, view.body, epoch.width, theme)
+            placeholder_file_block(view.file, theme)
                 .into_iter()
                 .map(DiffRow::plain)
                 .collect()
@@ -1187,27 +1305,8 @@ impl DiffPane {
 
         let inner = diff_scrollbar::body_area(area);
         let viewport = inner.height as usize;
-
-        if self.landing && self.window_complete {
-            self.landing = false;
-            if let Some((scroll, row)) = land(&self.window, viewport) {
-                select_row(&self.window, row, &mut self.cursor);
-                self.cursor_ready = true;
-                self.cursor.scroll = scroll;
-            }
-        }
-
-        if self.cursor_ready
-            && self
-                .window
-                .get(self.cursor.row)
-                .is_some_and(DiffRow::is_selectable)
-            && std::mem::take(&mut self.reveal_cursor)
-        {
-            keep_visible(&mut self.cursor, viewport.max(1));
-        }
-        let scroll = self.cursor.scroll.min(self.max_scroll(viewport));
-        self.cursor.scroll = scroll;
+        self.settle(area);
+        let scroll = self.cursor.scroll;
         let end = scroll
             .saturating_add(viewport.max(1))
             .min(self.window.len());
@@ -1302,24 +1401,12 @@ fn heading(title: PaneTitle, theme: &Theme) -> Line<'static> {
     match title {
         PaneTitle::Diff => Line::from("─[0]─Diff─"),
         PaneTitle::Uncommitted => Line::from("─[0]─Uncommitted changes─"),
-        PaneTitle::Visited => Line::from("─[0]─Visited file─"),
         PaneTitle::One(column) => Line::from(format!("─[0]─{} changes─", label(column))),
         PaneTitle::Both(shown) => {
-            let active = Style::default()
-                .fg(rgb_to_color(theme.border_active))
-                .add_modifier(Modifier::BOLD);
-            let inactive = Style::default().fg(Color::Reset);
-            let tab = |column| {
-                let style = if column == shown { active } else { inactive };
-                Span::styled(label(column), style)
-            };
-            Line::from(vec![
-                Span::raw("─[0]─"),
-                tab(Column::Staged),
-                Span::styled(" - ", inactive),
-                tab(Column::Unstaged),
-                Span::raw("─"),
-            ])
+            let mut spans = vec![Span::raw("─[0]─")];
+            spans.extend(column_tabs(shown, theme));
+            spans.push(Span::raw("─"));
+            Line::from(spans)
         }
     }
 }
@@ -1688,7 +1775,7 @@ mod tests {
     }
 
     #[test]
-    fn assemble_window_emits_header_and_hunk_for_one_file() {
+    fn a_single_file_window_shows_its_hunks_without_a_header() {
         let resolved = vec![ResolvedFile {
             file: file_diff("foo.txt"),
             before: "hello\n".to_string(),
@@ -1699,17 +1786,12 @@ mod tests {
         let texts: Vec<String> = window.iter().map(line_text).collect();
 
         assert!(
-            texts.iter().any(|t| t == "foo.txt"),
-            "expected file header, got: {texts:#?}"
+            !texts.iter().any(|t| t.contains("foo.txt")),
+            "the name is on the border, not in the body: {texts:#?}"
         );
-        assert!(
-            texts.iter().any(|t| t.contains("hello")),
-            "expected removed line in: {texts:#?}"
-        );
-        assert!(
-            texts.iter().any(|t| t.contains("world")),
-            "expected added line in: {texts:#?}"
-        );
+        assert!(texts.iter().any(|t| t.contains("hello")), "{texts:#?}");
+        assert!(texts.iter().any(|t| t.contains("world")), "{texts:#?}");
+        assert_eq!(window_files(&state), ["foo.txt"]);
     }
 
     #[test]
@@ -1795,10 +1877,6 @@ mod tests {
         let window = state.visible_diff_window(DrawBudget::Full);
         let texts: Vec<String> = window.iter().map(line_text).collect();
         assert!(
-            texts.iter().any(|t| t == "bin"),
-            "expected the file header, got: {texts:#?}"
-        );
-        assert!(
             texts.iter().any(|t| t.contains("Binary file")),
             "expected the binary placeholder, got: {texts:#?}"
         );
@@ -1814,10 +1892,6 @@ mod tests {
         let mut state = make_state(&resolved);
         let window = state.visible_diff_window(DrawBudget::Full);
         let texts: Vec<String> = window.iter().map(line_text).collect();
-        assert!(
-            texts.iter().any(|t| t == "sub"),
-            "expected the file header, got: {texts:#?}"
-        );
         assert!(
             texts
                 .iter()
@@ -1874,13 +1948,9 @@ mod tests {
         let mut state = make_state(&resolved);
         assert!(state.unstaged.cache.is_empty());
 
-        // An uncached file submits work and immediately shows its header.
+        // An uncached file submits work and immediately shows a placeholder.
         let window = state.visible_diff_window(DrawBudget::Fast);
         let texts: Vec<String> = window.iter().map(line_text).collect();
-        assert!(
-            texts.iter().any(|t| t == "a.txt"),
-            "placeholder should show the file header, got: {texts:#?}"
-        );
         assert!(
             texts.iter().any(|t| t.contains("Rendering")),
             "placeholder should show a Rendering line, got: {texts:#?}"
@@ -1901,51 +1971,49 @@ mod tests {
     }
 
     #[test]
-    fn file_headers_show_syntax_support_before_and_after_rendering() {
-        let headers = |path: &str| -> (String, String) {
+    fn the_border_shows_the_files_syntax_support() {
+        let border = |path: &str| -> String {
             let resolved = vec![ResolvedFile {
                 file: file_diff(path),
                 before: "val x = 1\n".to_string(),
                 after: "val x = 2\n".to_string(),
             }];
             let mut state = make_state(&resolved);
-            let placeholder = line_text(&state.visible_diff_window(DrawBudget::Fast)[0]);
-            wait_for_render(&mut state.unstaged);
-            let rendered = line_text(&state.visible_diff_window(DrawBudget::Fast)[0]);
-            (placeholder, rendered)
+            crate::cli::browse::test_screen::screen(&mut state).remove(0)
         };
-
-        for path in ["Main.kt", "Dockerfile", "notes.txt"] {
-            let (placeholder, rendered) = headers(path);
-            assert_eq!(placeholder, rendered, "{path}");
-        }
-        assert!(headers("Main.kt").1.ends_with(" Kotlin"));
+        let kotlin = border("Main.kt");
+        assert!(kotlin.contains("Kotlin ─╮"), "{kotlin}");
+        let docker = border("Dockerfile");
         assert!(
-            headers("Dockerfile")
-                .1
-                .ends_with(" Dockerfile · no scope context")
+            docker.contains("Dockerfile · no scope context ─╮"),
+            "{docker}"
         );
-        assert_eq!(headers("notes.txt").1, "notes.txt");
+        let plain = border("notes.txt");
+        assert!(plain.contains("[0] notes.txt "), "{plain}");
+        assert!(plain.ends_with("──╮"), "plain text has no badge: {plain}");
     }
 
     #[test]
-    fn assemble_window_renders_in_display_order() {
-        // Files supplied in input order [a, b]; the window walks display
-        // order, so the first header is whichever file sorts first.
+    fn a_window_of_several_files_divides_them_in_display_order() {
         let resolved = vec![resolved("b.txt"), resolved("a.txt")];
         let mut state = make_state(&resolved);
-        // Select the directory-less root subtree by selecting nothing
-        // special: instead, assert single-file selection shows its file.
-        let window = state.visible_diff_window(DrawBudget::Full);
-        let first = line_text(&window[0]);
-        assert!(
-            first == "a.txt" || first == "b.txt",
-            "expected a file header first, got {first:?}"
-        );
+        state.show_whole(true);
+        let texts: Vec<String> = state
+            .visible_diff_window(DrawBudget::Full)
+            .iter()
+            .map(line_text)
+            .collect();
+        let divider = |path: &str| {
+            texts
+                .iter()
+                .position(|t| t.starts_with(&format!("── {path} ─")))
+                .unwrap_or_else(|| panic!("no divider for {path}: {texts:#?}"))
+        };
+        assert!(divider("a.txt") < divider("b.txt"));
     }
 
     #[test]
-    fn assemble_window_includes_rename_header_when_renamed() {
+    fn a_rename_is_named_old_to_new_on_the_border() {
         let mut f = file_diff("new.txt");
         f.old_path = "old.txt".to_string();
         f.rename_from = Some("old.txt".to_string());
@@ -1955,18 +2023,8 @@ mod tests {
             after: "y\n".to_string(),
         }];
         let mut state = make_state(&resolved);
-        let combined: String = state
-            .visible_diff_window(DrawBudget::Full)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            combined.contains("renamed:")
-                && combined.contains("old.txt")
-                && combined.contains("new.txt"),
-            "missing rename header in: {combined}"
-        );
+        let border = crate::cli::browse::test_screen::screen(&mut state).remove(0);
+        assert!(border.contains("[0] old.txt → new.txt "), "{border}");
     }
 
     #[test]
@@ -2055,17 +2113,15 @@ mod tests {
 
         // Only beta/b.rs's content must be inside the window.
         assert!(
-            visible_text.contains("beta/b.rs")
-                && visible_text.contains("old_beta")
-                && visible_text.contains("new_beta"),
+            visible_text.contains("old_beta") && visible_text.contains("new_beta"),
             "beta content missing from filtered window: {visible_text:?}"
         );
         assert!(
-            !visible_text.contains("alpha/a.rs") && !visible_text.contains("old_alpha"),
+            !visible_text.contains("old_alpha"),
             "alpha leaked into beta filter: {visible_text:?}"
         );
         assert!(
-            !visible_text.contains("gamma/c.rs") && !visible_text.contains("old_gamma"),
+            !visible_text.contains("old_gamma"),
             "gamma leaked into beta filter: {visible_text:?}"
         );
 
@@ -2079,20 +2135,20 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            file_text.contains("beta/b.rs") && file_text.contains("new_beta"),
+            file_text.contains("new_beta"),
             "beta file content missing from filtered window: {file_text:?}"
         );
-        assert!(
-            !file_text.contains("alpha/a.rs") && !file_text.contains("gamma/c.rs"),
-            "siblings leaked into single-file filter: {file_text:?}"
+        assert_eq!(
+            window_files(&state),
+            ["beta/b.rs"],
+            "siblings leaked: {file_text:?}"
         );
     }
 
     #[test]
     fn window_narrows_to_subtree_on_dir_selection() {
         // Two files in different dirs: src/a.txt and other/b.txt. Selecting a
-        // dir restricts the window to that dir's file; selecting the other
-        // dir restricts to the other file.
+        // dir restricts the window to that dir's file.
         let resolved = vec![
             ResolvedFile {
                 file: file_diff("src/a.txt"),
@@ -2108,26 +2164,30 @@ mod tests {
         let mut state = make_state(&resolved);
 
         // Initial selection is on a file: window is exactly that file.
-        let file_first = {
-            let window = state.visible_diff_window(DrawBudget::Full);
-            line_text(&window[0])
-        };
-        assert!(
-            file_first == "src/a.txt" || file_first == "other/b.txt",
-            "expected a file header at start, got {file_first:?}"
-        );
+        state.visible_diff_window(DrawBudget::Full);
+        assert_eq!(window_files(&state).len(), 1);
 
-        // Move up onto the dir header above the first file.
+        // Move up onto the dir row above the first file: its one file.
         state.sidebar.top(20);
         assert!(state.sidebar.selected_directory_path().is_some());
-        let first_line = {
-            let window = state.visible_diff_window(DrawBudget::Full);
-            line_text(&window[0])
-        };
-        assert!(
-            first_line == "src/a.txt" || first_line == "other/b.txt",
-            "expected the dir's file header at start, got {first_line:?}"
-        );
+        state.visible_diff_window(DrawBudget::Full);
+        assert_eq!(window_files(&state).len(), 1);
+    }
+
+    /// The files whose lines the unstaged window draws, in order.
+    fn window_files(state: &super::super::FilesMode) -> Vec<String> {
+        let mut files: Vec<String> = Vec::new();
+        for anchor in state
+            .unstaged
+            .rows()
+            .iter()
+            .filter_map(|row| row.anchor.as_ref())
+        {
+            if !files.contains(&anchor.path) {
+                files.push(anchor.path.clone());
+            }
+        }
+        files
     }
 
     #[test]

@@ -38,7 +38,7 @@ use crate::cli::browse::double_click::DoubleClick;
 use crate::cli::browse::syntax_badge::SyntaxBadge;
 use crate::cli::browse::text::display_width;
 use crate::lsp::{Found, Lsp, Query, State, Symbol, Ticket};
-use crate::sidebar::{IconMode, display_path};
+use crate::sidebar::{IconMode, filter_icon};
 
 /// Spinner frames, one per 100 ms.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -985,12 +985,15 @@ pub(super) fn footer(nav: &Navigation) -> Option<String> {
 /// server's state.
 pub(super) fn observe(state: &mut FilesMode, files: &[usize]) {
     let column = state.shown();
-    let mut languages: Vec<Language> = files
+    let mut languages: Vec<Language> = Vec::new();
+    for language in files
         .iter()
         .filter_map(|&index| body(&state.model, index, column)?.0.language())
-        .collect();
-    languages.sort_by_key(|language| language.id());
-    languages.dedup();
+    {
+        if !languages.contains(&language) {
+            languages.push(language);
+        }
+    }
     if let Some(lsp) = &state.nav.lsp {
         for &language in &languages {
             if lsp.serves(language) && state.nav.warmed.insert(language) {
@@ -1024,60 +1027,115 @@ pub(super) fn draw(
             }
         }
     }
-    draw_marks(state, frame, area, theme);
+    draw_border_badge(state, frame, area, theme);
     if let Some(list) = state.nav.list.as_mut() {
         draw_list(frame, list, theme);
     }
 }
 
-/// Beside each file header's language badge, its server's state: a
+/// The right end of the diff pane's top border for file `index`: its
+/// language badge (icon and name), then its language server's state. A
 /// green `●` when ready, a spinner (and percentage) while it starts or
-/// indexes, a red `✕` when it failed, nothing when off. Drawn only over
-/// blank cells, so a long path keeps priority.
-fn draw_marks(state: &FilesMode, frame: &mut ratatui::Frame<'_>, area: Rect, theme: &Theme) {
-    let Some(lsp) = &state.nav.lsp else {
-        return;
+/// indexes, a red `✕` when it failed, nothing when there is no server.
+fn border_badge(state: &FilesMode, index: usize, theme: &Theme) -> Vec<Span<'static>> {
+    let Some((diff, _)) = body(&state.model, index, state.shown()) else {
+        return Vec::new();
     };
-    let column = state.shown();
-    let (body, headers) = state.pane(column).file_headers(area);
-    let icons = IconMode::from_env();
-    for (index, y) in headers {
-        let Some((diff, _)) = self::body(&state.model, index, column) else {
-            continue;
-        };
-        let Some(language) = diff.language() else {
-            continue;
-        };
-        let (text, color) = match lsp.state(language) {
-            State::Off => continue,
-            State::Ready => ("●".to_string(), theme.status_added),
+    let path = crate::sidebar::display_path(&state.model.files[index].file);
+    let Some(badge) = SyntaxBadge::new(
+        diff.language(),
+        diff.highlight(),
+        path,
+        IconMode::from_env(),
+        theme,
+    ) else {
+        return Vec::new();
+    };
+    let mut spans = badge.spans().to_vec();
+    let mark = match (&state.nav.lsp, diff.language()) {
+        (Some(lsp), Some(language)) => match lsp.state(language) {
+            State::Off => None,
+            State::Ready => Some(("●".to_string(), theme.status_added)),
             State::Loading(percent) => {
                 let spinner = state.nav.spinner();
-                let text = percent.map_or(spinner.to_string(), |p| format!("{spinner} {p}%"));
-                (text, theme.status_partial)
+                let mark = percent.map_or(spinner.to_string(), |p| format!("{spinner} {p}%"));
+                Some((mark, theme.status_partial))
             }
-            State::Failed => ("✕".to_string(), theme.status_deleted),
-        };
-        let path = display_path(&state.model.files[index].file);
-        let Some(badge) = SyntaxBadge::new(Some(language), diff.highlight(), path, icons, theme)
-        else {
-            continue;
-        };
-        let right = (body.x + body.width) as usize;
-        let Some(end) = right.checked_sub(badge.width() + 1) else {
-            continue;
-        };
-        let Some(start) = end.checked_sub(display_width(&text)) else {
-            continue;
-        };
-        let buffer = frame.buffer_mut();
-        let blank = (start.saturating_sub(1).max(body.x as usize)..end)
-            .all(|x| buffer[(x as u16, y)].symbol() == " ");
-        if blank {
-            let style = buffer[(start as u16, y)].style().fg(rgb_to_color(color));
-            buffer.set_string(start as u16, y, text, style);
-        }
+            State::Failed => Some(("✕".to_string(), theme.status_deleted)),
+        },
+        _ => None,
+    };
+    if let Some((mark, color)) = mark {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            mark,
+            Style::default()
+                .fg(rgb_to_color(color))
+                .add_modifier(Modifier::BOLD),
+        ));
     }
+    spans
+}
+
+/// Columns the right end of the border takes for file `index`, with the
+/// filter funnel when it shows: what the title leaves free.
+pub(super) fn border_badge_width(state: &FilesMode, index: usize, theme: &Theme) -> usize {
+    let badge: usize = border_badge(state, index, theme)
+        .iter()
+        .map(|span| display_width(&span.content))
+        .sum();
+    let funnel = if state.hide_low_hunks {
+        display_width(filter_icon(IconMode::from_env())) + 1
+    } else {
+        0
+    };
+    badge + funnel + 2
+}
+
+/// Draw the right end of the diff pane's top border for the file the
+/// pane is on, left of the filter funnel when there is one, and only
+/// over the border's rule, so the title keeps priority.
+fn draw_border_badge(state: &FilesMode, frame: &mut ratatui::Frame<'_>, area: Rect, theme: &Theme) {
+    let Some(index) = state.pane(state.shown()).current_file(&state.model, area) else {
+        return;
+    };
+    let spans = border_badge(state, index, theme);
+    if spans.is_empty() {
+        return;
+    }
+    let width: usize = spans
+        .iter()
+        .map(|span| display_width(&span.content))
+        .sum::<usize>()
+        + 2;
+    let funnel = if state.hide_low_hunks {
+        display_width(filter_icon(IconMode::from_env())) + 1
+    } else {
+        0
+    };
+    let Some(end) = (area.right() as usize).checked_sub(2 + funnel) else {
+        return;
+    };
+    let Some(start) = end.checked_sub(width) else {
+        return;
+    };
+    let buffer = frame.buffer_mut();
+    let y = area.y;
+    let on_rule = (start.saturating_sub(1).max(area.x as usize + 1)..end)
+        .all(|x| buffer[(x as u16, y)].symbol() == "─");
+    if !on_rule {
+        return;
+    }
+    let border = buffer[(start as u16, y)].style();
+    let mut x = start as u16;
+    buffer.set_string(x, y, " ", border);
+    x += 1;
+    for span in spans {
+        let style = border.patch(span.style);
+        buffer.set_string(x, y, &span.content, style);
+        x += display_width(&span.content) as u16;
+    }
+    buffer.set_string(x, y, " ", border);
 }
 
 fn draw_list(frame: &mut ratatui::Frame<'_>, list: &mut List, theme: &Theme) {

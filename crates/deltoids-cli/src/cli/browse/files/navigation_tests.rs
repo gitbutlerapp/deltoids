@@ -434,7 +434,7 @@ fn callers_list_the_diff_first_and_an_outside_caller_opens_as_a_visited_file() {
         .find(|row| row.contains("report.rs"))
         .unwrap_or_default();
     assert!(row.contains('○') && !row.contains("visited"), "{row}");
-    assert!(screen.contains("Visited file"), "{screen}");
+    assert!(screen.contains("[0] ○ src/report.rs "), "{screen}");
     assert!(screen.contains("not in this diff"), "{screen}");
     assert_eq!(
         state.sidebar.totals().files,
@@ -582,7 +582,7 @@ fn a_click_picks_a_symbol_a_double_click_goes_to_it_and_a_right_click_lists_call
 }
 
 #[test]
-fn the_header_shows_indexing_progress_and_the_footer_the_lookup() {
+fn the_border_shows_indexing_progress_and_the_footer_the_lookup() {
     let script = |_: &dyn Fn(&str) -> String| -> Script {
         let progress = |value: Value| {
             Message::Notification(Notification::new(
@@ -613,8 +613,11 @@ fn the_header_shows_indexing_progress_and_the_footer_the_lookup() {
     } = fixture(script);
     open_without_settling(&mut state, "src/main.rs");
     assert!(
-        eventually(|| header(&mut state, "src/main.rs").contains("62%")),
-        "the header shows indexing progress"
+        eventually(|| {
+            let border = border(&mut state);
+            border.contains(" Rust ") && border.contains("62%")
+        }),
+        "the border shows indexing progress"
     );
     assert!(
         Mode::background(&mut state, true).pending,
@@ -631,7 +634,7 @@ fn the_header_shows_indexing_progress_and_the_footer_the_lookup() {
 
     Mode::handle_key(&mut state, KeyCode::Esc, PANE_HEIGHT);
     assert!(
-        eventually(|| header(&mut state, "src/main.rs").contains('●')),
+        eventually(|| border(&mut state).contains("Rust ●")),
         "indexing ended: ready"
     );
     assert!(
@@ -641,16 +644,14 @@ fn the_header_shows_indexing_progress_and_the_footer_the_lookup() {
 }
 
 #[test]
-fn headers_show_their_server_state_before_the_diff_has_focus() {
+fn the_border_shows_the_server_state_before_the_diff_has_focus() {
     let Fixture {
         mut state,
         dir: _dir,
         record,
     } = fixture(|uri| shop_server(uri));
     assert_eq!(state.focus, Focus::Sidebar);
-    assert!(eventually(
-        || header(&mut state, "src/cart.rs").contains('●')
-    ));
+    assert!(eventually(|| border(&mut state).contains("Rust ●")));
     assert_eq!(
         record.launches(),
         1,
@@ -662,20 +663,20 @@ fn headers_show_their_server_state_before_the_diff_has_focus() {
         dir: _dir,
         ..
     } = fixture(|_| Arc::new(|_| Reply::Hangup));
-    assert!(eventually(
-        || header(&mut state, "src/cart.rs").contains('✕')
-    ));
+    assert!(eventually(|| border(&mut state).contains("Rust ✕")));
 }
 
-/// The screen row of `path`'s file header, drawing a frame first.
-fn header(state: &mut FilesMode, path: &str) -> String {
+/// The diff pane's top border, drawing a frame first.
+fn border(state: &mut FilesMode) -> String {
     let screen = text(&test_screen::draw(state));
     Mode::background(state, true);
     screen
         .lines()
-        .find(|row| row.contains(path))
+        .next()
         .unwrap_or_default()
-        .to_string()
+        .chars()
+        .skip(LEFT as usize)
+        .collect()
 }
 
 /// Store the working tree's changed files as blobs, so content

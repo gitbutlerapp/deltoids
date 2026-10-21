@@ -323,7 +323,9 @@ mod tests {
             deltoids::ChangeLayout::Grouped,
             &theme(),
         );
-        assert_eq!(line_text(&state.unstaged.rows()[0].line), "b.txt");
+        let area = ratatui::layout::Rect::new(0, 0, 80, 20);
+        let shown = state.unstaged.current_file(&m2, area);
+        assert_eq!(shown, m2.index_of("b.txt"));
         assert_eq!(state.unstaged.cursor.scroll, 0);
     }
 
@@ -589,7 +591,7 @@ mod tests {
             .unstaged
             .rows()
             .iter()
-            .position(|row| line_text(&row.line) == "src/b.txt")
+            .position(|row| line_text(&row.line).starts_with("── src/b.txt "))
             .unwrap();
         state.unstaged.scroll_by((b_start + 10) as isize, 4);
         let before = top_line(&state);

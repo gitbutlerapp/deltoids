@@ -258,14 +258,7 @@ impl FilesMode {
     ) {
         self.diff_rect = right;
         self.sync_header();
-        let mut spec = self.panes.view(self.selection(), self.column);
-        if spec
-            .range
-            .as_ref()
-            .is_some_and(|range| range.len() == 1 && self.model.is_visited(spec.order[range.start]))
-        {
-            spec.title = PaneTitle::Visited;
-        }
+        let spec = self.panes.view(self.selection(), self.column);
         let shown_files: Vec<usize> = spec
             .range
             .clone()
@@ -293,7 +286,20 @@ impl FilesMode {
                 hide_low: self.hide_low_hunks,
             },
         );
+        pane.settle(right);
+        let current = pane.current_file(&self.model, right);
         let status = navigate::footer(&self.nav).or(self.status.clone());
+        let title = spec.title;
+        let heading = current.map(|index| {
+            let budget = (right.width as usize)
+                .saturating_sub(navigate::border_badge_width(self, index, theme));
+            diff_pane::file_heading(&self.model, index, title, budget, theme)
+        });
+        let pane = match spec.column {
+            Column::Staged => &mut self.staged,
+            Column::Unstaged => &mut self.unstaged,
+        };
+        pane.set_heading(heading);
         pane.render(frame, right, focused, theme, status.as_deref());
         navigate::observe(self, &shown_files);
         navigate::draw(self, frame, right, focused, theme);
@@ -1557,8 +1563,10 @@ mod tests {
                 .any(|line| line_text(line).contains("Rendering"))
         );
         handle_key(&mut state, KeyCode::Char('j'), 18);
-        let immediate = state.visible_diff_window(DrawBudget::Fast);
-        assert_eq!(line_text(&immediate[0]), "b.txt");
+        state.visible_diff_window(DrawBudget::Fast);
+        let area = Rect::new(0, 0, 80, 20);
+        let shown = state.unstaged.current_file(&state.model, area);
+        assert_eq!(shown, state.model.index_of("b.txt"));
         wait_for_render(&mut state.unstaged);
         let ready = state.visible_diff_window(DrawBudget::Fast);
         assert!(
@@ -1754,8 +1762,9 @@ mod tests {
         state.show_whole(false);
         let one = rows(&mut state);
         assert_eq!(at(&one, "commit c4b48c0"), None, "{one:#?}");
-        assert!(at(&one, "a.rs").is_some(), "{one:#?}");
-        assert_eq!(at(&one, "b.rs"), None, "{one:#?}");
+        let shown = state.unstaged.current_file(&state.model, state.diff_rect);
+        assert_eq!(shown, state.model.index_of("a.rs"), "{one:#?}");
+        assert_eq!(at(&one, "── "), None, "one file needs no divider: {one:#?}");
     }
 
     fn test_commit(short_id: &str, message: &str) -> git::Commit {
@@ -1817,7 +1826,7 @@ mod tests {
             !file.iter().any(|row| row.starts_with("commit ")),
             "{file:#?}"
         );
-        assert!(file.iter().any(|row| row.contains("a.rs")), "{file:#?}");
+        assert!(file.iter().any(|row| row.contains("const x")), "{file:#?}");
 
         handle_key(&mut state, KeyCode::Char('k'), 18);
         assert_eq!(assembled_text(&mut state), header);

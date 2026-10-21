@@ -1284,7 +1284,12 @@ fn a_commit_preview_reads_like_git_show() {
     let mut workspace = stacked_workspace(dir.path(), stubs.path());
 
     press(&mut workspace, &[KeyCode::Char('j')]);
-    let preview = right_text(&mut workspace);
+    // The border names the file under the cursor; read the body below it.
+    let screen = right_text(&mut workspace);
+    let preview = screen
+        .split_once('\n')
+        .map_or("", |(_, body)| body)
+        .to_string();
 
     let at = |text: &str| {
         preview.find(text).unwrap_or_else(|| {

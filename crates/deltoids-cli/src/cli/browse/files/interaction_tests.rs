@@ -729,7 +729,11 @@ fn a_file_with_both_columns_shows_one_and_s_switches_to_the_other() {
     let mut mode = live(dir.path());
     select_file(&mut mode, "a.txt");
     let rows = settle(&mut mode);
-    assert!(rows[0].contains("[0]─Staged - Unstaged"), "{}", rows[0]);
+    assert!(
+        rows[0].contains("[0] a.txt · Staged - Unstaged "),
+        "{}",
+        rows[0]
+    );
     let body = rows.join("\n");
     assert!(body.contains("line 11 unstaged"), "unstaged is the default");
     assert!(!body.contains("line 2 staged"));
@@ -744,7 +748,8 @@ fn a_file_with_both_columns_shows_one_and_s_switches_to_the_other() {
     // the next file that has both.
     select_file(&mut mode, "b.txt");
     let rows = settle(&mut mode);
-    assert!(rows[0].contains("[0]─Unstaged changes"), "{}", rows[0]);
+    assert!(rows[0].contains("[0] b.txt ─"), "{}", rows[0]);
+    assert!(!rows[0].contains("Staged"), "{}", rows[0]);
     Mode::handle_key(&mut mode, KeyCode::Char('s'), 20);
     assert_eq!(mode.shown(), Column::Unstaged, "s needs both columns");
     select_file(&mut mode, "a.txt");
@@ -1075,8 +1080,14 @@ fn sidebar_z_on_a_directory_expands_every_file_under_it() {
 
     mode.sidebar.top(20);
     mode.snap_diff_to_selected_file();
-    assert!(window_text(&mut mode).starts_with("other.rs"));
     assert!(!window_text(&mut mode).contains("Counter { value: 0 }"));
+    let files: Vec<String> = mode
+        .unstaged
+        .rows()
+        .iter()
+        .filter_map(|row| row.anchor.as_ref().map(|anchor| anchor.path.clone()))
+        .collect();
+    assert!(files.iter().all(|path| path == "other.rs") && !files.is_empty());
 }
 
 #[test]
@@ -1084,11 +1095,11 @@ fn sidebar_z_keeps_the_diff_scroll() {
     let dir = two_hunk_fixture(&["a.rs"]);
     let mut mode = live(dir.path());
     window_text(&mut mode);
-    Mode::handle_key(&mut mode, KeyCode::Char('J'), 20);
+    Mode::handle_key(&mut mode, KeyCode::Char('J'), 5);
     let scroll = mode.unstaged.cursor.scroll;
     assert!(scroll > 0);
 
-    Mode::handle_key(&mut mode, KeyCode::Char('z'), 20);
+    Mode::handle_key(&mut mode, KeyCode::Char('z'), 5);
     assert!(window_text(&mut mode).contains("Counter { value: 0 }"));
     assert_eq!(mode.unstaged.cursor.scroll, scroll);
 }
@@ -1169,8 +1180,9 @@ fn a_visited_file_that_fits_keeps_its_header() {
     let (dir, _repo) = txt_repo(&[10]);
     let mut mode = live(dir.path());
 
-    let body = diff_body(&settle(&mut mode));
-    assert!(body[1].starts_with("a.txt"), "{}", body.join("\n"));
+    let rows = settle(&mut mode);
+    assert_eq!(mode.unstaged.cursor.scroll, 0, "{}", rows.join("\n"));
+    assert!(rows[0].contains("[0] a.txt "), "{}", rows[0]);
 }
 
 #[test]
@@ -1209,8 +1221,9 @@ fn scrolling_before_the_file_renders_cancels_the_landing() {
     let mut mode = live(dir.path());
     Mode::handle_key(&mut mode, KeyCode::Char('K'), 20);
 
-    let body = diff_body(&settle(&mut mode));
-    assert!(body[1].starts_with("a.rs"), "{}", body.join("\n"));
+    let rows = settle(&mut mode);
+    assert_eq!(mode.unstaged.cursor.scroll, 0, "{}", rows.join("\n"));
+    assert!(rows[0].contains("[0] a.rs "), "{}", rows[0]);
 }
 
 #[test]
@@ -1265,7 +1278,7 @@ fn gitbutler_adopting_the_repository_shows_one_uncommitted_column_and_one_discar
     )
     .unwrap();
     let after = settle(&mut mode).join("\n");
-    assert!(after.contains("Uncommitted changes"), "{after}");
+    assert!(after.contains("[0] a.txt ─"), "{after}");
     assert!(!after.contains("Staged"), "{after}");
 
     Mode::handle_key(&mut mode, KeyCode::Char('d'), 20);

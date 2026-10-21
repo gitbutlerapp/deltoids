@@ -1,7 +1,7 @@
 use super::*;
 use std::time::{Duration, Instant};
 
-use crate::cli::browse::files::test_support::{line_text, model_of, theme};
+use crate::cli::browse::files::test_support::{model_of, theme};
 use deltoids::ChangeLayout;
 
 fn epoch(width: usize, theme: &Theme) -> CacheEpoch {
@@ -40,7 +40,7 @@ fn retention_pressure_keeps_the_selected_file_and_stops_when_preparation_finishe
         &theme,
     );
     finish(&mut cache);
-    assert_eq!(line_text(&cache.get(epoch, 0).unwrap()[0].line), "a.txt");
+    assert_eq!(block_path(cache.get(epoch, 0).unwrap()), "a.txt");
     assert!(cache.get(epoch, 2).is_none());
     cache.request(
         epoch,
@@ -63,7 +63,7 @@ fn retention_pressure_keeps_the_selected_file_and_stops_when_preparation_finishe
         &theme,
     );
     finish(&mut cache);
-    assert_eq!(line_text(&cache.get(epoch, 2).unwrap()[0].line), "c.txt");
+    assert_eq!(block_path(cache.get(epoch, 2).unwrap()), "c.txt");
     assert!(cache.get(epoch, 0).is_none());
 }
 
@@ -103,7 +103,7 @@ fn changing_render_settings_rejects_old_width_layout_and_theme_results() {
     finish(&mut cache);
     assert!(cache.get(initial, 0).is_none());
     let rows = cache.get(changed, 2).unwrap();
-    assert_eq!(line_text(&rows[0].line), "c.txt");
+    assert_eq!(block_path(rows), "c.txt");
     assert!(rows.iter().all(|row| row.line.width() <= changed.width));
 }
 
@@ -137,12 +137,17 @@ fn a_directory_viewport_can_render_its_last_file_before_the_directory_finishes()
         &theme,
     );
     finish(&mut cache);
-    assert_eq!(
-        line_text(&cache.get(epoch, 99).unwrap()[0].line),
-        "src/f099.txt"
-    );
+    assert_eq!(block_path(cache.get(epoch, 99).unwrap()), "src/f099.txt");
     assert!(
         cache.get(epoch, 50).is_none(),
         "offscreen demand should remain deferred"
     );
+}
+
+/// The file a rendered block draws, from its first line's anchor.
+fn block_path(rows: &[crate::cli::browse::diff_cursor::DiffRow]) -> String {
+    rows.iter()
+        .find_map(|row| row.anchor.as_ref())
+        .map(|anchor| anchor.path.clone())
+        .unwrap_or_default()
 }
