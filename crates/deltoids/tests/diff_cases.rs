@@ -3,8 +3,9 @@
 //! Discovers every case directory under `tests/diff_cases/cases`, runs the
 //! diff engine over its `before`/`after` files, and compares the result to
 //! the case's `expected.diff`. Every case, and a sweep of seeded random
-//! edits (each also expanded up to twice) over the case inputs, must also
-//! satisfy the exact-cover invariant in `diff_cases/exact_cover.rs`.
+//! edits (each also expanded up to twice, or revealing a hidden line)
+//! over the case inputs, must also satisfy the exact-cover invariant in
+//! `diff_cases/exact_cover.rs`.
 
 #[path = "diff_cases/exact_cover.rs"]
 mod exact_cover;
@@ -84,6 +85,78 @@ fn random_edits_show_each_changed_line_exactly_once() {
         failures.len(),
         failures.join("\n\n")
     );
+}
+
+#[test]
+fn random_reveals_show_the_line_and_keep_exact_cover() {
+    let mut failures = Vec::new();
+    for case in discover_cases(&cases_root()) {
+        let original = case.original();
+        let lines: Vec<&str> = original.lines().collect();
+        for seed in 1..=EDITS_PER_CASE {
+            let updated = mutate(&lines, seed);
+            if let Some(error) = reveal_violation(&original, &updated, &case.diff_path(), seed) {
+                failures.push(format!(
+                    "{} seed {seed} {error}\n--- updated ---\n{updated}",
+                    case.name
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} random reveal(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// Reveal a seeded new-file line no hunk draws: the result must draw it,
+/// keep exact cover, and fold back to the original hunks with one shrink
+/// of the hunk that now holds it. `None` when every line is drawn.
+fn reveal_violation(original: &str, updated: &str, path: &str, seed: u64) -> Option<String> {
+    let diff = Diff::compute(original, updated, path);
+    let drawn = drawn_new_lines(diff.hunks());
+    let hidden: Vec<usize> = (1..=updated.lines().count())
+        .filter(|line| !drawn.contains(line))
+        .collect();
+    if hidden.is_empty() || diff.hunks().is_empty() {
+        return None;
+    }
+    let line = hidden[seed as usize % hidden.len()];
+    let Some(revealed) = diff.reveal(line) else {
+        return Some(format!("reveal {line}: returned None"));
+    };
+    if let Some(error) = exact_cover::violations(original, updated, revealed.hunks()).first() {
+        return Some(format!("reveal {line}: {error}"));
+    }
+    let Some(holder) = revealed
+        .hunks()
+        .iter()
+        .position(|hunk| drawn_new_lines(std::slice::from_ref(hunk)).contains(&line))
+    else {
+        return Some(format!("reveal {line}: line still hidden"));
+    };
+    let folded = revealed.shrink(holder);
+    if folded.map(|diff| format!("{:?}", diff.hunks())) != Some(format!("{:?}", diff.hunks())) {
+        return Some(format!("reveal {line}: one shrink did not fold it back"));
+    }
+    None
+}
+
+/// 1-based new-file lines the hunks draw.
+fn drawn_new_lines(hunks: &[deltoids::Hunk]) -> std::collections::HashSet<usize> {
+    let mut drawn = std::collections::HashSet::new();
+    for hunk in hunks {
+        let mut line = hunk.new_start;
+        for diff_line in &hunk.lines {
+            if diff_line.kind != deltoids::LineKind::Removed {
+                drawn.insert(line);
+                line += 1;
+            }
+        }
+    }
+    drawn
 }
 
 /// The first exact-cover break in the diff of `original` and `updated`,

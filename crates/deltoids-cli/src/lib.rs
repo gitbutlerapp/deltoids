@@ -2,4 +2,5 @@
 
 pub mod cli;
 mod judgments;
+mod lsp;
 mod sidebar;

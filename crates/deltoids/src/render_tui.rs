@@ -776,6 +776,73 @@ fn visible_char(ch: char) -> Option<VisibleChar> {
     })
 }
 
+/// Where each visible char of a diff line lands once wrapped to `width`:
+/// its byte range in `content`, its row, and its columns. Follows the
+/// same rules the diff body renders with ([`visible_char`] and
+/// [`WrapSink`]), so overlays and hit tests line up with the drawn text.
+fn char_cells(
+    content: &str,
+    width: usize,
+) -> Vec<(std::ops::Range<usize>, usize, std::ops::Range<usize>)> {
+    let mut cells = Vec::new();
+    let (mut row, mut col) = (0, 0);
+    for (start, ch) in content.char_indices() {
+        let Some(visible) = visible_char(ch) else {
+            continue;
+        };
+        if col + visible.width > width {
+            row += 1;
+            col = 0;
+        }
+        cells.push((
+            start..start + visible.byte_len,
+            row,
+            col..col + visible.width,
+        ));
+        col += visible.width;
+    }
+    cells
+}
+
+/// The screen cells that draw `bytes` of a diff line wrapped to `width`,
+/// as `(row, columns)` pairs: one per wrapped row the range touches, rows
+/// counted from the line's first row and columns from the body's left
+/// edge. Empty when nothing visible falls in `bytes` or `width` is 0.
+pub fn line_cells(
+    content: &str,
+    bytes: std::ops::Range<usize>,
+    width: usize,
+) -> Vec<(usize, std::ops::Range<u16>)> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut spans: Vec<(usize, std::ops::Range<u16>)> = Vec::new();
+    for (range, row, cols) in char_cells(content, width) {
+        if range.start < bytes.start || range.start >= bytes.end {
+            continue;
+        }
+        let cols = cols.start as u16..cols.end as u16;
+        match spans.last_mut() {
+            Some((last_row, last)) if *last_row == row => last.end = cols.end,
+            _ => spans.push((row, cols)),
+        }
+    }
+    spans
+}
+
+/// The byte offset of the char drawn at `row` (counted from the line's
+/// first row) and `col` of a diff line wrapped to `width`, or `None`
+/// past the line's text.
+pub fn byte_at(content: &str, row: usize, col: usize, width: usize) -> Option<usize> {
+    if width == 0 {
+        return None;
+    }
+    char_cells(content, width)
+        .into_iter()
+        .find(|(_, cell_row, cols)| *cell_row == row && cols.contains(&col))
+        .map(|(range, _, _)| range.start)
+}
+
 /// Consumer of a stream of styled visible characters.
 ///
 /// The char-production functions ([`produce_highlighted`] /
@@ -1155,6 +1222,84 @@ pub fn render_pane_scrollbar(
 mod tests {
     use super::*;
     use crate::{Diff, DiffLine, Language, ScopeNode};
+
+    /// The text drawn in `cells` when `content` renders as a diff line.
+    fn drawn_in(content: &str, width: usize, cells: &[(usize, std::ops::Range<u16>)]) -> String {
+        let rows: Vec<Vec<char>> = syntax_diff_line(
+            content,
+            Color::Reset,
+            &[(SyntectStyle::default(), content)],
+            width,
+            &Theme::default(),
+        )
+        .iter()
+        .map(|line| {
+            line_text(line)
+                .chars()
+                .flat_map(|ch| {
+                    let pad = (ch.width().unwrap_or(0) > 1).then_some('\0');
+                    std::iter::once(ch).chain(pad)
+                })
+                .collect()
+        })
+        .collect();
+        cells
+            .iter()
+            .map(|(row, cols)| {
+                rows[*row][cols.start as usize..cols.end as usize]
+                    .iter()
+                    .filter(|ch| **ch != '\0')
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn line_cells_land_on_the_drawn_symbol_after_tabs() {
+        let content = "\t\tcart.total()";
+        let start = content.find("total").unwrap();
+        let cells = line_cells(content, start..start + 5, 40);
+        assert_eq!(cells, vec![(0, 13..18)]);
+        assert_eq!(drawn_in(content, 40, &cells), "total");
+    }
+
+    #[test]
+    fn line_cells_follow_a_symbol_across_a_wrap() {
+        let content = "let x = some_long_name;";
+        let start = content.find("some_long_name").unwrap();
+        let cells = line_cells(content, start..start + 14, 12);
+        assert_eq!(cells, vec![(0, 8..12), (1, 0..10)]);
+        assert_eq!(drawn_in(content, 12, &cells), "some_long_name");
+    }
+
+    #[test]
+    fn line_cells_count_wide_chars_as_two_columns() {
+        let content = "日本 = go()";
+        let start = content.find("go").unwrap();
+        let cells = line_cells(content, start..start + 2, 40);
+        assert_eq!(cells, vec![(0, 7..9)]);
+        assert_eq!(drawn_in(content, 40, &cells), "go");
+    }
+
+    #[test]
+    fn byte_at_inverts_line_cells() {
+        let content = "\tlet é = some_long_name;";
+        for (row, cols) in line_cells(content, 0..content.len(), 10) {
+            for col in cols {
+                let byte = byte_at(content, row, col as usize, 10).expect("drawn cell");
+                let cells = line_cells(content, byte..byte + 1, 10);
+                assert!(cells.iter().any(|(r, c)| *r == row && c.contains(&col)));
+            }
+        }
+        assert_eq!(byte_at(content, 0, 2, 10), Some(0));
+        assert_eq!(byte_at(content, 9, 0, 10), None);
+    }
+
+    #[test]
+    fn zero_width_has_no_cells() {
+        assert!(line_cells("abc", 0..3, 0).is_empty());
+        assert_eq!(byte_at("abc", 0, 0, 0), None);
+    }
 
     #[test]
     fn a_preview_matches_final_rows_and_can_arrive_before_rendering_stops() {

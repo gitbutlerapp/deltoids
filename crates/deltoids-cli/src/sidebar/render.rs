@@ -88,6 +88,9 @@ pub(super) fn render_row(
         Row::Dir { label, depth } => {
             dir_row_spans(&mut spans, label, *depth, folded, meta, icons, theme, base)
         }
+        Row::File { name, depth, .. } if meta.visited => {
+            visited_row_spans(&mut spans, name, *depth, icons, theme, base)
+        }
         Row::File { name, depth, .. } => {
             file_row_spans(&mut spans, name, *depth, meta, icons, theme, base)
         }
@@ -217,6 +220,30 @@ pub fn render_note(
         None => spans.push(Span::styled(" ".to_string(), base)),
     }
     Line::from(spans)
+}
+
+/// An unchanged file a jump opened: a muted `○` where the status goes,
+/// the name in italics, and a muted "visited" where the counts go.
+fn visited_row_spans(
+    spans: &mut Vec<Span<'static>>,
+    name: &str,
+    depth: usize,
+    icons: IconMode,
+    theme: &Theme,
+    base: Style,
+) {
+    let muted = base.fg(rgb_to_color(theme.muted));
+    spans.push(Span::styled(indent(depth), base));
+    spans.push(Span::styled(" \u{25cb} ".to_string(), muted));
+    if icons == IconMode::On {
+        let icon = file_icon(name);
+        spans.push(Span::styled(format!("{} ", icon.glyph), muted));
+    }
+    spans.push(Span::styled(
+        name.to_string(),
+        base.add_modifier(Modifier::ITALIC),
+    ));
+    spans.push(Span::styled(" visited".to_string(), muted));
 }
 
 #[allow(clippy::too_many_arguments)]

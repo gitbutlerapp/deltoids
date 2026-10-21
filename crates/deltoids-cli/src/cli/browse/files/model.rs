@@ -28,6 +28,9 @@ pub(super) struct Model {
     pub(super) stages: HashMap<String, StageStatus>,
     /// Whether the working tree splits into staged and unstaged columns.
     pub(super) columns: Columns,
+    /// How many files at the end of `files` are visited: unchanged files
+    /// shown whole because a jump landed in them (see [`Model::visit`]).
+    pub(super) visited: usize,
 }
 
 /// Which staging column a diff pane shows.
@@ -68,7 +71,54 @@ impl Model {
             splits: Vec::new(),
             stages: HashMap::new(),
             columns: Columns::Split,
+            visited: 0,
         }
+    }
+
+    /// Add the unchanged file `path` with content `text`, shown whole
+    /// after the changed files. Does nothing when `path` is already in
+    /// the model. Returns its index.
+    pub(super) fn visit(&mut self, path: &str, text: &str) -> usize {
+        if let Some(index) = self.index_of(path) {
+            return index;
+        }
+        self.files.push(ResolvedFile {
+            file: FileDiff {
+                preamble: Vec::new(),
+                old_path: path.to_string(),
+                new_path: path.to_string(),
+                rename_from: None,
+                old_hash: None,
+                new_hash: None,
+                old_mode: None,
+                new_mode: None,
+                hunks: Vec::new(),
+            },
+            before: text.to_string(),
+            after: text.to_string(),
+        });
+        self.bodies
+            .push(FileBody::Diff(Arc::new(Diff::whole(text, path))));
+        self.splits.push(None);
+        self.visited += 1;
+        self.files.len() - 1
+    }
+
+    /// Whether file `index` is a visited file, not a change.
+    pub(super) fn is_visited(&self, index: usize) -> bool {
+        index >= self.changed_files() && index < self.files.len()
+    }
+
+    /// How many files are changes; the visited ones follow them.
+    pub(super) fn changed_files(&self) -> usize {
+        self.files.len() - self.visited
+    }
+
+    /// The index of the file shown at `path`.
+    pub(super) fn index_of(&self, path: &str) -> Option<usize> {
+        self.files
+            .iter()
+            .position(|resolved| display_path(&resolved.file) == path)
     }
 
     /// Staging status of file `index`, when known.
@@ -439,6 +489,7 @@ fn finish_model(
         bodies,
         stages,
         columns: Columns::Split,
+        visited: 0,
     })
 }
 

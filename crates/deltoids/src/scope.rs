@@ -12,7 +12,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::Language;
-use crate::engine::Snapshot;
+use crate::engine::{DiffOp, Snapshot};
 use crate::syntax::ParsedFile;
 use expansion::Expansion;
 use serde::{Deserialize, Serialize};
@@ -156,6 +156,81 @@ impl Diff {
         }
     }
 
+    /// An unchanged file shown whole: one context hunk over every line,
+    /// for reading a file the diff does not touch. Empty text has no
+    /// hunks. Nothing expands, shrinks, or reveals.
+    pub fn whole(text: &str, path: &str) -> Self {
+        let lines: Vec<DiffLine> = text
+            .lines()
+            .map(|line| DiffLine {
+                kind: LineKind::Context,
+                content: line.to_string(),
+            })
+            .collect();
+        let hunks = if lines.is_empty() {
+            Vec::new()
+        } else {
+            vec![Hunk {
+                old_start: 1,
+                new_start: 1,
+                lines,
+                ancestors: Vec::new(),
+            }]
+        };
+        Diff {
+            snapshot: Snapshot::compute(text, text),
+            hunks,
+            language: Language::detect(path, text),
+            highlight: Language::detect_highlight_name(path, text),
+            original: Arc::from(text),
+            updated: Arc::from(text),
+            widened: Vec::new(),
+        }
+    }
+
+    /// This diff with the hunk nearest new-file `line` (1-based) grown
+    /// until it shows that line, through the levels [`Diff::expand`]
+    /// steps through. The growth is recorded as one expansion, so one
+    /// [`Diff::shrink`] folds it back. Returns `None` when a hunk already
+    /// shows the line, the line is not in the new file, or the diff has
+    /// no hunks.
+    pub fn reveal(&self, line: usize) -> Option<Diff> {
+        let target = line.checked_sub(1)?;
+        if self
+            .hunks
+            .iter()
+            .any(|hunk| new_span(hunk).contains(&target))
+        {
+            return None;
+        }
+        let old_line = self.snapshot.ops().iter().find_map(|op| match *op {
+            DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } if (new_index..new_index + len).contains(&target) => {
+                Some(old_index + target - new_index)
+            }
+            _ => None,
+        })?;
+        let hunk = self
+            .hunks
+            .iter()
+            .min_by_key(|hunk| distance(old_span(hunk), old_line))?;
+        let (original, updated) = (&*self.original, &*self.updated);
+        with_expansion(original, updated, self.language, |expansion| {
+            let total_old = original.lines().count();
+            let changed = changed_span(hunk);
+            let mut shown = old_span(hunk);
+            while !shown.contains(&old_line) {
+                shown = expansion.next_level(shown, changed.clone(), total_old)?;
+            }
+            let mut widened = self.widened.clone();
+            widened.push(shown);
+            Some(self.rebuilt(expansion, widened))
+        })
+    }
+
     /// This diff with hunk `index`'s context grown one scope level
     /// outward, merged with any hunks it now overlaps.
     ///
@@ -276,6 +351,11 @@ impl Diff {
         self.snapshot.unified_text()
     }
 
+    /// Returns the full updated (new-side) content.
+    pub fn updated(&self) -> &str {
+        &self.updated
+    }
+
     /// Returns the enriched hunks.
     pub fn hunks(&self) -> &[Hunk] {
         &self.hunks
@@ -306,6 +386,26 @@ fn old_span(hunk: &Hunk) -> Range<usize> {
         .filter(|line| line.kind != LineKind::Added)
         .count();
     start..start + len
+}
+
+/// New lines a hunk shows: its context and added lines.
+fn new_span(hunk: &Hunk) -> Range<usize> {
+    let start = hunk.new_start - 1;
+    let len = hunk
+        .lines
+        .iter()
+        .filter(|line| line.kind != LineKind::Removed)
+        .count();
+    start..start + len
+}
+
+/// How many lines `line` sits outside `span`; 0 inside it.
+fn distance(span: Range<usize>, line: usize) -> usize {
+    if line < span.start {
+        span.start - line
+    } else {
+        line.saturating_sub(span.end.saturating_sub(1))
+    }
 }
 
 /// Old lines from the hunk's first change to its last removed line. Empty

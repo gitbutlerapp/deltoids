@@ -43,7 +43,7 @@ use crate::cli::browse::watch::{
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
 use deltoids::{ChangeLayout, Diff, LineKind, Theme, git};
@@ -63,6 +63,9 @@ mod diff_pane;
 #[cfg(test)]
 mod interaction_tests;
 mod model;
+mod navigate;
+#[cfg(test)]
+mod navigation_tests;
 #[cfg(test)]
 mod performance_tests;
 mod reload;
@@ -193,6 +196,8 @@ pub(super) struct FilesMode {
     /// Show the whole snapshot: the commits' header and every file,
     /// whatever the sidebar selects.
     whole: bool,
+    /// Go to definition, callers, jumps, and visited files.
+    nav: navigate::Navigation,
 }
 
 impl FilesMode {
@@ -230,6 +235,11 @@ impl FilesMode {
             Err(_) => Self::loading(vcs, theme, initial_diff_width),
         };
         mode._watcher = watcher;
+        if let Some(root) = mode.vcs.as_ref().and_then(|vcs| vcs.repo().workdir()) {
+            let root = root.to_path_buf();
+            mode.nav =
+                navigate::Navigation::new(Some(crate::lsp::Lsp::discover(&root)), Some(root));
+        }
         mode.review = review::Review::from_env();
         mode.start_review();
         mode
@@ -248,7 +258,15 @@ impl FilesMode {
     ) {
         self.diff_rect = right;
         self.sync_header();
-        let spec = self.panes.view(self.selection(), self.column);
+        navigate::observe(self, focused);
+        let mut spec = self.panes.view(self.selection(), self.column);
+        if spec
+            .range
+            .as_ref()
+            .is_some_and(|range| range.len() == 1 && self.model.is_visited(spec.order[range.start]))
+        {
+            spec.title = PaneTitle::Visited;
+        }
         let pane = match spec.column {
             Column::Staged => &mut self.staged,
             Column::Unstaged => &mut self.unstaged,
@@ -271,7 +289,9 @@ impl FilesMode {
                 hide_low: self.hide_low_hunks,
             },
         );
-        pane.render(frame, right, focused, theme, self.status.as_deref());
+        let status = navigate::footer(&self.nav, pane.footer()).or(self.status.clone());
+        pane.render(frame, right, focused, theme, status.as_deref());
+        navigate::draw(self, frame, right, focused, theme);
 
         if let InputState::Commenting { anchor, buffer, .. } = &self.input {
             let label = format!("{}:{}", anchor.path, anchor.line);
@@ -279,6 +299,20 @@ impl FilesMode {
         }
         if let InputState::Discarding { menu, selected } = &self.input {
             action_menu::draw(frame, menu, *selected, theme);
+        }
+    }
+
+    /// The language servers and the workdir they serve, for the other
+    /// views of this repository to share.
+    pub(super) fn servers(&self) -> Option<(crate::lsp::Lsp, PathBuf)> {
+        self.nav.servers()
+    }
+
+    /// Navigate with `servers`, shared with another view of the same
+    /// repository.
+    pub(super) fn attach_servers(&mut self, servers: Option<(crate::lsp::Lsp, PathBuf)>) {
+        if let Some((lsp, root)) = servers {
+            self.nav = navigate::Navigation::new(Some(lsp), Some(root));
         }
     }
 
@@ -371,6 +405,7 @@ impl FilesMode {
             read_only: false,
             commits: Vec::new(),
             whole: false,
+            nav: navigate::Navigation::new(None, None),
         };
         mode.start_review();
         mode
@@ -826,16 +861,16 @@ fn handle_discard_key(state: &mut FilesMode, key: KeyCode) -> AppCommand {
 
 /// Handle a mode-internal key (the shell strips global bindings first).
 fn handle_key(state: &mut FilesMode, key: KeyCode, height: usize) -> AppCommand {
-    if matches!(state.input, InputState::Commenting { .. }) {
-        return handle_comment_key(state, key);
+    match state.input {
+        InputState::Commenting { .. } => return handle_comment_key(state, key),
+        InputState::Discarding { .. } => return handle_discard_key(state, key),
+        InputState::Normal => {}
     }
-
-    if matches!(state.input, InputState::Discarding { .. }) {
-        return handle_discard_key(state, key);
-    }
-
     if state.action_job.is_none() {
         state.status = None;
+    }
+    if navigate::handle_key(state, key) {
+        return AppCommand::Continue;
     }
     if key == KeyCode::Char('f') {
         state.toggle_hidden(height);
@@ -877,6 +912,7 @@ fn handle_key(state: &mut FilesMode, key: KeyCode, height: usize) -> AppCommand 
             state.toggle_column();
             AppCommand::Continue
         }
+
         // Enter on a file or the root row opens its diff; on a directory
         // it folds.
         KeyCode::Enter
@@ -1119,6 +1155,9 @@ fn handle_mouse(state: &mut FilesMode, mouse: MouseEvent, height: usize) -> AppC
     if !matches!(state.input, InputState::Normal) {
         return AppCommand::Continue;
     }
+    if navigate::mouse(state, &mouse) {
+        return AppCommand::Continue;
+    }
     // Ghostty/macOS sends Shift+vertical wheel as horizontal wheel events.
     // Both shapes step through files; Ctrl+vertical wheel does too.
     let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
@@ -1204,20 +1243,27 @@ fn handle_mouse(state: &mut FilesMode, mouse: MouseEvent, height: usize) -> AppC
                 // Clicking a diff line moves the cursor there; clicks on
                 // headers, spacers, wrapped continuations, and comment
                 // rows only focus the pane.
-                Focus::Diff => {
-                    let content_y = mouse
-                        .row
-                        .saturating_sub(state.diff_rect.y)
-                        .saturating_sub(1) as usize;
-                    let column = state.shown();
-                    let pane = state.pane_mut(column);
-                    pane.select_row(pane.cursor.scroll + content_y);
-                }
+                Focus::Diff => navigate::left_click(state, &mouse),
             }
             AppCommand::Continue
         }
         _ => AppCommand::Continue,
     }
+}
+
+/// `Ctrl+o` goes back from a jump; every other key is plain.
+fn handle_key_event(state: &mut FilesMode, key: KeyEvent, height: usize) -> AppCommand {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
+        if !matches!(state.input, InputState::Normal) {
+            return AppCommand::Continue;
+        }
+        if state.action_job.is_none() {
+            state.status = None;
+        }
+        navigate::back(state);
+        return AppCommand::Continue;
+    }
+    handle_key(state, key.code, height)
 }
 
 impl Mode for FilesMode {
@@ -1234,12 +1280,14 @@ impl Mode for FilesMode {
         }
         let staged_changed = self.staged.cache.collect();
         let unstaged_changed = self.unstaged.cache.collect();
+        let (navigated, looking_up) = navigate::tick(self);
         BackgroundWork {
-            changed: staged_changed || unstaged_changed || action_changed,
+            changed: staged_changed || unstaged_changed || action_changed || navigated,
             pending: self.staged.cache.pending()
                 || self.unstaged.cache.pending()
                 || self.action_job.is_some()
-                || self.review.pending(),
+                || self.review.pending()
+                || looking_up,
         }
     }
 
@@ -1249,6 +1297,8 @@ impl Mode for FilesMode {
 
     fn reserves_key(&self, key: KeyCode) -> bool {
         matches!(key, KeyCode::Char('f' | 'F'))
+            || self.focus == Focus::Diff
+                && matches!(key, KeyCode::Char('w' | 'b' | 'r') | KeyCode::Enter)
             || !self.read_only
                 && self.focus == Focus::Sidebar
                 && matches!(key, KeyCode::Char(' ' | 'd' | 'a'))
@@ -1271,6 +1321,10 @@ impl Mode for FilesMode {
 
     fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand {
         handle_key(self, key, height)
+    }
+
+    fn handle_key_event(&mut self, key: KeyEvent, height: usize) -> AppCommand {
+        handle_key_event(self, key, height)
     }
 
     fn captures_text_input(&self) -> bool {
@@ -1319,15 +1373,21 @@ impl Mode for FilesMode {
             return Ok(false);
         };
         // `vcs` borrows `self.vcs`; the rest are disjoint fields.
+        let nav = &self.nav;
         let outcome = reload_working_tree(
             [&mut self.staged, &mut self.unstaged],
             &mut self.sidebar,
             &mut self.model,
             &mut self.last_input,
             vcs,
+            &|model| nav.revisit(model),
             theme,
             viewport.height,
         );
+        if outcome == ReloadOutcome::Rebuilt {
+            navigate::cancel(self);
+            self.nav.sync(&self.model);
+        }
         self.reload_failed = matches!(outcome, ReloadOutcome::Failed(_));
         if matches!(
             outcome,
@@ -1421,6 +1481,14 @@ impl panel::Panel for FilesMode {
 
     fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand {
         handle_key(self, key, height)
+    }
+
+    fn handle_key_event(&mut self, key: KeyEvent, height: usize) -> AppCommand {
+        handle_key_event(self, key, height)
+    }
+
+    fn escape(&mut self) -> bool {
+        navigate::escape(self)
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, height: usize) -> AppCommand {

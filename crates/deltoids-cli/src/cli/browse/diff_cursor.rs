@@ -133,6 +133,12 @@ impl Cursor {
         self.target = Some((anchor, self.row.saturating_sub(self.scroll)));
     }
 
+    /// Put the cursor on `anchor`'s file line, `offset` rows below the
+    /// viewport top, once rows that draw it exist: a jump.
+    pub(super) fn jump(&mut self, anchor: CommentAnchor, offset: usize) {
+        self.target = Some((anchor, offset));
+    }
+
     /// Record the line the cursor now sits on. Every move ends here, so a
     /// pane can never forget to keep the two in step.
     fn sync_place(&mut self, rows: &[DiffRow]) {

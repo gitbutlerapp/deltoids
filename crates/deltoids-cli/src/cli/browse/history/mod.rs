@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -152,9 +152,21 @@ pub(super) struct History {
     now: i64,
     side_rect: Rect,
     main_rect: Rect,
+    /// Language servers commit previews navigate with.
+    servers: Option<(crate::lsp::Lsp, std::path::PathBuf)>,
 }
 
 impl History {
+    /// Navigate commit previews with `servers`, shared with the Files
+    /// panel.
+    pub(super) fn with_servers(
+        mut self,
+        servers: Option<(crate::lsp::Lsp, std::path::PathBuf)>,
+    ) -> Self {
+        self.servers = servers;
+        self
+    }
+
     /// The branches panel.
     pub(super) fn branches(mut vcs: Vcs) -> Self {
         let overview = vcs.overview();
@@ -180,6 +192,7 @@ impl History {
             now: now(),
             side_rect: Rect::default(),
             main_rect: Rect::default(),
+            servers: None,
         }
     }
 
@@ -247,7 +260,8 @@ impl History {
         let selected = Snapshot::Commit(selected);
         if !self.preview.as_ref().is_some_and(|p| p.shows(&selected)) {
             let repo_dir = self.vcs.repo().git_dir().to_path_buf();
-            let mut preview = SnapshotPanel::preview(repo_dir, selected);
+            let mut preview =
+                SnapshotPanel::preview(repo_dir, selected).with_servers(self.servers.clone());
             // Keys reach the preview only from the main view, where it
             // reads like `git show`.
             preview.focus_main(true);
@@ -571,6 +585,19 @@ impl Panel for History {
             _ => self.move_list(key, height),
         }
         AppCommand::Continue
+    }
+
+    fn handle_key_event(&mut self, key: KeyEvent, height: usize) -> AppCommand {
+        if self.main_focused && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return self.preview().map_or(AppCommand::Continue, |preview| {
+                preview.handle_key_event(key, height)
+            });
+        }
+        self.handle_key(key.code, height)
+    }
+
+    fn escape(&mut self) -> bool {
+        self.main_focused && self.preview().is_some_and(Panel::escape)
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, height: usize) -> AppCommand {

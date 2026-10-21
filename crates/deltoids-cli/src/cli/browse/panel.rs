@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -56,6 +56,19 @@ pub(super) trait Panel {
     /// Handle a key for whichever half has focus. `height` is that
     /// half's inner height.
     fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand;
+
+    /// Handle a key with its modifiers, as
+    /// [`super::mode::Mode::handle_key_event`].
+    fn handle_key_event(&mut self, key: KeyEvent, height: usize) -> AppCommand {
+        self.handle_key(key.code, height)
+    }
+
+    /// Drop transient state of the panel's own on `Esc` (a pending
+    /// lookup, an open list) and say whether there was any. When there
+    /// was none, `Esc` keeps its workspace meaning.
+    fn escape(&mut self) -> bool {
+        false
+    }
 
     /// Handle a mouse event over either half, hit-tested against the
     /// rects of the last draw. `height` is the inner height of the half

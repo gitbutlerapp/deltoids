@@ -24,6 +24,7 @@ Hunks expand to show the enclosing function, so you always know where you are.
 - **Expanded context:** understand changes within their enclosing scope.
 - **Git and GitButler integration:** review file status and manage changes in one place.
 - **Review comments:** copy review notes with file and line references for coding agents.
+- **Code navigation:** jump to definitions and callers through language servers, inside the diff and out.
 - **Review guidance:** see which changes need attention first.
 - **Responsive TUI:** keep up with changes without unnecessary redraws.
 - **Syntax themes:** choose colors that suit your workflow.
@@ -143,6 +144,45 @@ Set `TYPESAFE_API_KEY` to let TypeSafe's Jev model judge each change
 when the TUI opens. Every changed file goes to Jev except package
 manager lockfiles, which are tagged `lockfile`, and generated files.
 Without the key, the sidebar shows no guidance.
+
+### Language servers
+
+Press `Enter` on a diff line in `deltoids tui` to go to the definition of
+the underlined symbol, and `r` to list a function's callers (`w` / `b`
+pick another symbol on the line; `Ctrl+o` goes back). A language server
+answers. deltoids starts it the first time a diff in its language gets
+focus, shows its progress in the diff footer, and stops it on quit.
+
+Navigation works on lines whose file matches the file on disk: the
+working tree, and commits or branches whose files have not changed since.
+Answers inside the diff move the cursor there; a line outside the shown
+hunks opens its hunk, and a file the diff does not touch opens as a
+*visited* file.
+
+deltoids looks for these servers on `PATH`:
+
+| Language | Server |
+| --- | --- |
+| Rust | `rust-analyzer` |
+| Go | `gopls` |
+| TypeScript, TSX, JavaScript | `typescript-language-server --stdio` |
+| Python | `pyright-langserver --stdio` |
+| C, C++ | `clangd` |
+| Ruby | `ruby-lsp` |
+| Lua | `lua-language-server` |
+| Bash | `bash-language-server start` |
+| Java | `jdtls` |
+| Kotlin | `kotlin-language-server` |
+
+A `[lsp.<language>]` table replaces a server or turns it off:
+
+```toml
+[lsp.python]
+command = ["basedpyright-langserver", "--stdio"]
+
+[lsp.go]
+enabled = false
+```
 
 ### Custom commands
 

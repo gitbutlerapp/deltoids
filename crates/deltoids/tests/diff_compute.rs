@@ -102,6 +102,44 @@ fn shrink_all_undoes_expand_all() {
     assert!(back.shrink_all().is_none());
 }
 
+#[test]
+fn whole_shows_every_line_once_as_context() {
+    let text = "fn a() {\n    1\n}\n";
+    let diff = Diff::whole(text, "lib.rs");
+    let [hunk] = diff.hunks() else {
+        panic!("one hunk expected");
+    };
+    assert_eq!((hunk.old_start, hunk.new_start), (1, 1));
+    let lines: Vec<&str> = hunk
+        .lines
+        .iter()
+        .map(|line| line.content.as_str())
+        .collect();
+    assert_eq!(lines, text.lines().collect::<Vec<_>>());
+    assert!(hunk.lines.iter().all(|line| line.kind == LineKind::Context));
+    assert!(diff.expand(0).is_none() && diff.reveal(2).is_none());
+    assert!(Diff::whole("", "lib.rs").hunks().is_empty());
+}
+
+#[test]
+fn reveal_is_none_for_a_drawn_line_or_one_past_the_file() {
+    let (original, updated) = two_distant_changes();
+    let diff = Diff::compute(&original, &updated, "notes.txt");
+    assert!(diff.reveal(10).is_none());
+    assert!(diff.reveal(0).is_none());
+    assert!(diff.reveal(201).is_none());
+}
+
+#[test]
+fn reveal_grows_the_nearest_hunk() {
+    let (original, updated) = two_distant_changes();
+    let diff = Diff::compute(&original, &updated, "notes.txt");
+    let revealed = diff.reveal(170).expect("line 170 is hidden");
+    let spans = old_spans(&revealed);
+    assert_eq!(spans[0], old_spans(&diff)[0], "the far hunk stays put");
+    assert!(spans[1].contains(&170));
+}
+
 /// A 200-line plain text file with changes on lines 10 and 190: far
 /// enough apart that one expansion step keeps them in separate hunks.
 fn two_distant_changes() -> (String, String) {

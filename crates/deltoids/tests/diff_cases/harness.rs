@@ -20,7 +20,8 @@
 //!                      order to `Diff::expand` on the previous result
 //!                      (`Diff::shrink` when prefixed with `-`). `*`
 //!                      calls `Diff::expand_all` and `-*`
-//!                      `Diff::shrink_all`.
+//!                      `Diff::shrink_all`. `reveal L` calls
+//!                      `Diff::reveal` with new-file line `L`.
 //!   6-expanded.diff    Expected output after each expansion, required
 //!                      when `5-expand.txt` exists (see [`format_expansions`]).
 //! ```
@@ -74,10 +75,12 @@ use deltoids::{Diff, Hunk, LineKind};
 // ---------------------------------------------------------------------------
 
 /// One line of `5-expand.txt`: expand (`N`) or shrink (`-N`) hunk `N`,
-/// or every hunk (`*` / `-*`) when `index` is `None`.
-pub struct Step {
-    pub shrink: bool,
-    pub index: Option<usize>,
+/// or every hunk (`*` / `-*`) when the index is `None`; or reveal
+/// new-file line `L` (`reveal L`).
+pub enum Step {
+    Expand(Option<usize>),
+    Shrink(Option<usize>),
+    Reveal(usize),
 }
 
 /// One discovered diff case on disk.
@@ -119,27 +122,26 @@ impl Case {
             .collect()
     }
 
-    /// Parse one `5-expand.txt` line: `N`, `-N`, `*` or `-*`.
+    /// Parse one `5-expand.txt` line: `N`, `-N`, `*`, `-*` or
+    /// `reveal L`.
     fn step(&self, line: &str) -> Step {
+        let number = |text: &str| -> usize {
+            text.trim().parse().unwrap_or_else(|e| {
+                panic!("{}: bad step {line:?}: {e}", self.expand_path.display())
+            })
+        };
+        if let Some(target) = line.strip_prefix("reveal ") {
+            return Step::Reveal(number(target));
+        }
         let (shrink, target) = match line.strip_prefix('-') {
             Some(target) => (true, target),
             None => (false, line),
         };
-        if target == "*" {
-            return Step {
-                shrink,
-                index: None,
-            };
-        }
-        let index = target.parse().unwrap_or_else(|e| {
-            panic!(
-                "{}: bad hunk index {line:?}: {e}",
-                self.expand_path.display()
-            )
-        });
-        Step {
-            shrink,
-            index: Some(index),
+        let index = (target != "*").then(|| number(target));
+        if shrink {
+            Step::Shrink(index)
+        } else {
+            Step::Expand(index)
         }
     }
 
@@ -303,9 +305,10 @@ fn format_range(start: usize, count: usize) -> String {
 }
 
 /// Render each of `steps` applied to `diff` in turn. Every step starts
-/// with `## expand N` or `## shrink N` (`all` for every hunk), followed
-/// by the hunks after it, or `(unchanged)` when the step returns `None`,
-/// which keeps the previous diff for the next step.
+/// with `## expand N`, `## shrink N` (`all` for every hunk) or
+/// `## reveal L`, followed by the hunks after it, or `(unchanged)` when
+/// the step returns `None`, which keeps the previous diff for the next
+/// step.
 pub fn format_expansions(diff: &Diff, steps: &[Step]) -> String {
     let mut out = String::new();
     let mut current = diff.clone();
@@ -313,16 +316,14 @@ pub fn format_expansions(diff: &Diff, steps: &[Step]) -> String {
         if position > 0 {
             out.push('\n');
         }
-        let (name, next) = match (step.shrink, step.index) {
-            (true, Some(index)) => ("shrink", current.shrink(index)),
-            (true, None) => ("shrink", current.shrink_all()),
-            (false, Some(index)) => ("expand", current.expand(index)),
-            (false, None) => ("expand", current.expand_all()),
+        let (heading, next) = match *step {
+            Step::Shrink(Some(index)) => (format!("shrink {index}"), current.shrink(index)),
+            Step::Shrink(None) => ("shrink all".to_string(), current.shrink_all()),
+            Step::Expand(Some(index)) => (format!("expand {index}"), current.expand(index)),
+            Step::Expand(None) => ("expand all".to_string(), current.expand_all()),
+            Step::Reveal(line) => (format!("reveal {line}"), current.reveal(line)),
         };
-        let target = step
-            .index
-            .map_or("all".to_string(), |index| index.to_string());
-        out.push_str(&format!("## {name} {target}\n"));
+        out.push_str(&format!("## {heading}\n"));
         match next {
             Some(next) => {
                 out.push_str(&format_hunks(next.hunks()));

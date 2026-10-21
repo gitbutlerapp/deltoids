@@ -1,0 +1,5 @@
+@@ -14,3 +14,3 @@ [impl_item Cart] [function_item savings]
+     pub fn savings(&self) -> u32 {
+-        self.total() / 10
++        self.total() / 5
+     }

@@ -929,6 +929,44 @@ impl DiffPane {
         self.window_key = None;
     }
 
+    /// Put the cursor on `anchor`'s line, a third of the way down the
+    /// viewport, as soon as rows that draw it exist: a jump to a
+    /// definition or a caller. Cancels landing on the first hunk.
+    pub(super) fn jump_to(&mut self, anchor: CommentAnchor, viewport: usize) {
+        self.landing = false;
+        self.reload_top = None;
+        self.cursor.jump(anchor, viewport / 3);
+        self.cursor_ready = true;
+        self.window_key = None;
+    }
+
+    /// The body rect inside `area` and the row, within it, where the
+    /// cursor's line starts, when that line is on screen. Valid after
+    /// [`DiffPane::render`] into `area`.
+    pub(super) fn cursor_on_screen(&self, area: Rect) -> Option<(Rect, usize)> {
+        if self.empty || !self.cursor_ready {
+            return None;
+        }
+        self.window
+            .get(self.cursor.row)
+            .filter(|row| row.is_selectable())?;
+        let body = diff_scrollbar::body_area(area);
+        let offset = self.cursor.row.checked_sub(self.cursor.scroll)?;
+        (offset < body.height as usize).then_some((body, offset))
+    }
+
+    /// The diff line drawn on window row `row`: the row its first row
+    /// sits on, the file line it draws, and which wrapped row of it
+    /// `row` is.
+    pub(super) fn line_at(&self, row: usize) -> Option<(usize, &CommentAnchor, usize)> {
+        let anchor = self.window.get(row)?.anchor.as_ref()?;
+        let first = (0..=row).rev().find(|&index| {
+            let candidate = &self.window[index];
+            candidate.place.is_some() && candidate.anchor.as_ref() == Some(anchor)
+        })?;
+        Some((first, anchor, row - first))
+    }
+
     /// Where the cursor sits: its rendered line and the file line it
     /// draws, when it is on a diff line.
     pub(super) fn cursor_line(&self) -> Option<(&LinePlace, &CommentAnchor)> {
@@ -1245,6 +1283,7 @@ fn heading(title: PaneTitle, theme: &Theme) -> Line<'static> {
     match title {
         PaneTitle::Diff => Line::from("─[0]─Diff─"),
         PaneTitle::Uncommitted => Line::from("─[0]─Uncommitted changes─"),
+        PaneTitle::Visited => Line::from("─[0]─Visited file─"),
         PaneTitle::One(column) => Line::from(format!("─[0]─{} changes─", label(column))),
         PaneTitle::Both(shown) => {
             let active = Style::default()

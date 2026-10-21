@@ -22,11 +22,25 @@ use super::model::{Model, body_deltas};
 
 /// Build the sidebar from a model plus per-file delta counts.
 pub(super) fn build_sidebar(model: &Model, theme: &Theme) -> Sidebar {
-    Sidebar::build(&sidebar_files(model), theme)
+    let mut sidebar = Sidebar::build(&sidebar_files(model), theme);
+    mark_visited(&mut sidebar, model);
+    sidebar
 }
 
 pub(super) fn rebuild_sidebar(sidebar: &Sidebar, model: &Model, hidden: &[bool]) -> Sidebar {
-    sidebar.rebuilt(&sidebar_files(model), hidden)
+    let mut sidebar = sidebar.rebuilt(&sidebar_files(model), hidden);
+    mark_visited(&mut sidebar, model);
+    sidebar
+}
+
+/// Mark the files a jump opened, when there are any.
+fn mark_visited(sidebar: &mut Sidebar, model: &Model) {
+    if model.visited > 0 {
+        let visited: Vec<bool> = (0..model.files.len())
+            .map(|index| model.is_visited(index))
+            .collect();
+        sidebar.set_visited(&visited);
+    }
 }
 
 pub(super) fn update_staging(sidebar: &mut Sidebar, model: &Model) {

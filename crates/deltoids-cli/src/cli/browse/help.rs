@@ -76,6 +76,11 @@ pub(super) const KEY_SECTIONS: &[HelpSection] = &[
         rows: &[
             ("Tab", "switch staged / unstaged diff"),
             ("z / x", "expand / shrink hunk under the cursor"),
+            ("w / b", "pick the next / previous symbol on the line"),
+            ("Enter", "go to the picked symbol's definition"),
+            ("r", "list the picked function's callers"),
+            ("Ctrl+o", "go back to before the last jump"),
+            ("Esc", "cancel a lookup / close the callers list"),
         ],
     },
     HelpSection {
@@ -97,6 +102,9 @@ pub(super) const MOUSE_SECTION: HelpSection = HelpSection {
         ("Click a file", "select it"),
         ("Click ▶ / ▼", "fold / unfold a directory"),
         ("Click a diff line", "move the cursor there"),
+        ("Click a symbol", "pick it"),
+        ("Double-click a symbol", "go to its definition"),
+        ("Right-click a symbol", "list its callers"),
         ("Double-click", "open a branch or commit, like Enter"),
         ("Wheel", "scroll the pane under the pointer"),
         ("Shift / Ctrl+wheel", "step through files"),

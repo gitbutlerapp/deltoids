@@ -43,7 +43,7 @@ crates/
     src/scope/hunks.rs        # Grouping, emission, breadcrumbs (exact cover)
     src/hunk_header.rs        # Shared header layout
     src/render.rs             # Diff rendering as ANSI
-    src/render_tui.rs         # Diff rendering for ratatui
+    src/render_tui.rs         # Diff rendering for ratatui (+ line_cells/byte_at: source bytes <-> wrapped cells)
     src/render_html.rs        # Diff rendering as HTML (feature `html`)
     src/git.rs                # Git blob lookup
     src/git/history.rs        # Local branches, commit walks, commit patches
@@ -52,6 +52,7 @@ crates/
     src/reverse.rs            # Diff reversal
     src/language.rs           # Language detection and config
     src/syntax.rs             # Tree-sitter parsing and scopes
+    src/symbols.rs            # Symbols: identifiers on a line (what go-to-definition asks about)
     tests/diff_cases.rs       # Diff-case suite + exact-cover random-edit sweep
     tests/diff_cases/         # Diff-case harness, exact-cover check, and cases
     tests/diff_compute.rs     # Diff::compute property tests
@@ -74,6 +75,15 @@ crates/
       tests.rs               #   interface tests; fixtures/ holds recorded
                              #     patches and Jev answers (re-record with
                              #     `record_jev_fixtures -- --ignored`)
+    src/lsp/                 # Language servers: definition + callers for a symbol
+      mod.rs                 #   Lsp handle (warm/ask/answer/cancel/progress/sync)
+      server.rs              #   one server: handshake, queue, documents, requests, progress
+      transport.rs           #   child-process adapter (stdio framing via lsp-server)
+      config.rs              #   [lsp.<language>] tables over built-in defaults
+      position.rs            #   file URIs, UTF-8/UTF-16 columns
+      fake.rs, tests.rs      #   scripted in-memory server + interface tests (one
+                             #     ignored test against real rust-analyzer;
+                             #     RUST_ANALYZER=<path> to pick the binary)
     src/cli.rs               # Subcommand module declarations
     src/cli/pager.rs         # `deltoids pager` subcommand
     src/cli/browse/          # scrolling TUI
@@ -112,6 +122,8 @@ crates/
         sidebar_pane.rs      #     sidebar pane slice
         reload.rs            #     working-tree watcher + rebuild
         review.rs            #     review guidance: Jev job, judgments, row notes
+        navigate.rs          #     go to definition/callers, jumps, Ctrl+o, visited files
+        navigation_tests.rs  #     navigation through keys, mouse, and screen (fake Lsp)
         test_support.rs      #     shared test fixtures
       vcs/                   #   git vs GitButler: the only place they differ
         mod.rs               #     Vcs (reads) + Writer (stage/discard)

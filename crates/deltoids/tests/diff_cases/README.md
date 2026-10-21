@@ -51,6 +51,8 @@ cases/<NNN-slug>/
                      `Diff::expand` (`Diff::shrink` when prefixed
                      with `-`), one per line. `*` calls
                      `Diff::expand_all` and `-*` `Diff::shrink_all`.
+                     `reveal L` calls `Diff::reveal` with new-file
+                     line `L`.
   6-expanded.diff    Recorded output after each expansion; required
                      with `5-expand.txt`.
 ```
@@ -81,7 +83,7 @@ hunk has no ancestors the breadcrumb section is empty.
 * A diff that produces no hunks (identical files) is the empty string.
 
 `6-expanded.diff` holds one section per line of `5-expand.txt`: a
-`## expand N` or `## shrink N` line (`all` for `*` steps), then the
+`## expand N`, `## shrink N` (`all` for `*` steps) or `## reveal L` line, then the
 hunks after that step on the previous result, or `(unchanged)` when
 there is no larger level.
 
@@ -145,6 +147,6 @@ Cases are organised loosely by theme via their numeric prefix:
 * `230-239` — replaces that add or split scopes
 * `240-249` — SQL scope behaviour
 * `250-259` — Kotlin scope behaviour
-* `300-309` — manual expansion (`Diff::expand`)
+* `300-309` — manual expansion (`Diff::expand`, `Diff::reveal`)
 
 Each case's `1-case.md` describes what it pins.

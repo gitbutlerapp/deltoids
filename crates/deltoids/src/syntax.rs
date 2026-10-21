@@ -106,6 +106,35 @@ impl ParsedFile {
         self.lines.len()
     }
 
+    /// Byte ranges, relative to the line's start, of the identifier
+    /// leaves on 0-based `line`, in source order. Identifiers are leaves
+    /// whose kind ends in `identifier` (`field_identifier`,
+    /// `type_identifier`, …) plus Ruby's `constant`.
+    pub(crate) fn identifiers_on_line(&self, line: usize) -> Vec<Range<usize>> {
+        let Some(span) = self.lines.get(line) else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        let mut stack = vec![self.tree.root_node()];
+        while let Some(node) = stack.pop() {
+            let (start, end) = (node.start_position().row, node.end_position().row);
+            if start > line || end < line {
+                continue;
+            }
+            if node.child_count() > 0 {
+                let mut cursor = node.walk();
+                let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+                stack.extend(children.into_iter().rev());
+                continue;
+            }
+            let kind = node.kind();
+            if start == end && (kind.ends_with("identifier") || kind == "constant") {
+                found.push(node.start_byte() - span.start..node.end_byte() - span.start);
+            }
+        }
+        found
+    }
+
     /// Collect the enclosing *boundary* tree-sitter nodes at `line`,
     /// outermost first. This is the shared walk behind
     /// [`Self::enclosing_scopes`] (which maps each node to a [`ScopeNode`])

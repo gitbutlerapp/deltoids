@@ -17,6 +17,7 @@ pub mod render_html;
 pub mod render_tui;
 pub mod reverse;
 mod scope;
+mod symbols;
 pub mod symlink;
 mod syntax;
 
@@ -28,4 +29,5 @@ pub use config::{
 pub use intraline::{EmphKind, EmphSection, LineEmphasis, compute_subhunk_emphasis};
 pub use language::Language;
 pub use scope::{Diff, DiffLine, Hunk, HunkRun, LineKind, ScopeNode};
+pub use symbols::Symbols;
 pub use symlink::SymlinkView;

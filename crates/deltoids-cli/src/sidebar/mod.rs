@@ -158,6 +158,8 @@ pub(super) struct FileRowMeta {
     /// preamble. Empty for directory rows.
     pub(super) extra: FileMetadata,
     pub(super) note: Option<RowNote>,
+    /// An unchanged file a jump opened, not a change.
+    pub(super) visited: bool,
 }
 
 impl FileRowMeta {
@@ -170,6 +172,7 @@ impl FileRowMeta {
             rename: None,
             extra: FileMetadata::default(),
             note: None,
+            visited: false,
         }
     }
 }
@@ -279,6 +282,7 @@ impl Sidebar {
                         rename,
                         extra: file_metadata(f.file),
                         note: None,
+                        visited: false,
                     }
                 }
             })
@@ -335,6 +339,28 @@ impl Sidebar {
             }
         }
         self.render_all();
+    }
+
+    /// Mark the files a jump opened (`visited[file_index]`): their rows
+    /// say so, and the totals leave them out. Re-renders in place.
+    pub fn set_visited(&mut self, visited: &[bool]) {
+        let mut count = 0;
+        for (index, row) in self.rows.iter().enumerate() {
+            if let Row::File { file_index, .. } = row {
+                let is_visited = visited.get(*file_index).copied().unwrap_or(false);
+                self.file_meta[index].visited = is_visited;
+                count += usize::from(is_visited);
+            }
+        }
+        self.totals.files = self.file_count() - count;
+        self.render_all();
+    }
+
+    fn file_count(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|row| matches!(row, Row::File { .. }))
+            .count()
     }
 
     /// File count + aggregate `+`/`-` totals, computed at build time.

@@ -13,7 +13,7 @@
 use crate::cli::browse::watch::ChangeReceiver;
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
@@ -120,6 +120,13 @@ pub(crate) trait Mode {
     /// (quit, help, theme picker, sidebar resize, layout toggle).
     /// `height` is the inner height of the panes.
     fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand;
+
+    /// Handle a key with its modifiers. The shell routes every key here;
+    /// a mode that binds chords (`Ctrl+o`) overrides it, others take the
+    /// plain [`Mode::handle_key`].
+    fn handle_key_event(&mut self, key: KeyEvent, height: usize) -> AppCommand {
+        self.handle_key(key.code, height)
+    }
 
     /// Built-in mode keys that take priority over configured custom commands.
     fn reserves_key(&self, _key: KeyCode) -> bool {

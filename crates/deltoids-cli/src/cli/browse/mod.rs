@@ -35,7 +35,9 @@ use std::io;
 use std::time::{Duration, Instant};
 use watch::ChangeReceiver;
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -611,14 +613,22 @@ impl Shell {
 
     /// Handle a key already in the shell. Global bindings are consumed
     /// here; everything else routes to the mode.
-    fn handle_key(&mut self, mode: &mut impl Mode, key: KeyCode, height: usize) -> AppCommand {
+    fn handle_key(
+        &mut self,
+        mode: &mut impl Mode,
+        event: impl Into<KeyEvent>,
+        height: usize,
+    ) -> AppCommand {
+        let event = event.into();
+        let key = event.code;
         // A mode with an open text editor owns every key, so global
         // bindings and custom-command keys are typed as literal text —
         // `q` included — and `Esc` closes the editor. Checked first, since
         // there is no way to type a `q` otherwise.
         if mode.captures_text_input() {
-            return mode.handle_key(key, height);
+            return mode.handle_key_event(event, height);
         }
+        let chord = event.modifiers.contains(KeyModifiers::CONTROL);
         // `q` quits from anywhere, popup or not.
         if key == KeyCode::Char('q') {
             return AppCommand::Quit;
@@ -661,12 +671,12 @@ impl Shell {
                 self.force_full = true;
                 AppCommand::Continue
             }
-            key if mode.reserves_key(key) => mode.handle_key(key, height),
+            key if mode.reserves_key(key) => mode.handle_key_event(event, height),
             // Custom commands take priority over unreserved mode keys (but not
             // over the shell globals above). A bound key with a selectable
             // file expands and bubbles up a Run request; with nothing
-            // selected it is a silent no-op.
-            KeyCode::Char(c) if self.command_for(c).is_some() => {
+            // selected it is a silent no-op. A `Ctrl` chord is not the key.
+            KeyCode::Char(c) if !chord && self.command_for(c).is_some() => {
                 let cmd = self.command_for(c).expect("checked by guard");
                 match mode.selected_path() {
                     Some(path) => AppCommand::Run(CustomRun {
@@ -676,7 +686,7 @@ impl Shell {
                     None => AppCommand::Continue,
                 }
             }
-            other => mode.handle_key(other, height),
+            _ => mode.handle_key_event(event, height),
         }
     }
 
@@ -795,7 +805,7 @@ impl Shell {
             }
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 self.resume();
-                self.handle_key(mode, key.code, vp.height)
+                self.handle_key(mode, key, vp.height)
             }
             Event::Mouse(mouse) => {
                 self.resume();

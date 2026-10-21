@@ -94,16 +94,21 @@ pub(super) enum ReloadOutcome {
 /// self-correct, so this returns [`ReloadOutcome::Failed`] rather than an
 /// error, leaving `model`/`last_input` untouched for the next tick to
 /// retry.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn reload_working_tree(
     panes: [&mut DiffPane; 2],
     sidebar: &mut Sidebar,
     model: &mut Model,
     last_input: &mut Patches,
     vcs: &Vcs,
+    revisit: &dyn Fn(&mut Model),
     theme: &Theme,
     height: usize,
 ) -> ReloadOutcome {
-    let computed = compute_reload(vcs, last_input, model);
+    let mut computed = compute_reload(vcs, last_input, model);
+    if let Ok(Some(Update::Model(_, rebuilt))) = &mut computed {
+        revisit(rebuilt);
+    }
     apply_reload(panes, sidebar, model, last_input, computed, theme, height)
 }
 

@@ -33,7 +33,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::Style;
@@ -122,6 +122,7 @@ impl Workspace {
     /// one it says so.
     fn open_repository(&mut self) {
         let but = self.but.clone();
+        let servers = self.files.servers();
         self.branches = self
             .files
             .repo_dir()
@@ -130,7 +131,7 @@ impl Workspace {
                 Some(program) => vcs.with_but(program),
                 None => vcs,
             })
-            .map(History::branches);
+            .map(|vcs| History::branches(vcs).with_servers(servers));
     }
 
     fn panel(&mut self, side: Side) -> Option<&mut dyn Panel> {
@@ -210,7 +211,8 @@ impl Workspace {
             let Some(dir) = self.files.repo_dir() else {
                 return;
             };
-            self.set_review(Some(SnapshotPanel::review(dir, snapshot)));
+            let review = SnapshotPanel::review(dir, snapshot).with_servers(self.files.servers());
+            self.set_review(Some(review));
         }
         self.focus(Side::Files, false);
     }
@@ -292,6 +294,20 @@ impl Mode for Workspace {
         }
     }
 
+    fn handle_key_event(&mut self, key: KeyEvent, height: usize) -> AppCommand {
+        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return self.handle_key(key.code, height);
+        }
+        let height = self.focused_height(height);
+        let side = self.side;
+        let Some(panel) = self.panel(side) else {
+            return AppCommand::Continue;
+        };
+        let command = panel.handle_key_event(key, height);
+        self.main_focused = panel.main_focused();
+        command
+    }
+
     fn handle_key(&mut self, key: KeyCode, height: usize) -> AppCommand {
         let height = self.focused_height(height);
         if self.captures_text_input() {
@@ -299,6 +315,7 @@ impl Mode for Workspace {
         }
         let side = self.side;
         match key {
+            KeyCode::Esc if self.panel(side).is_some_and(|panel| panel.escape()) => {}
             KeyCode::Char('0') => self.focus(side, true),
             KeyCode::Char(n) if Side::from_number(n).is_some() => {
                 self.focus(Side::from_number(n).expect("checked by guard"), false);

@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use crossterm::event::{KeyCode, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -113,6 +113,8 @@ pub(in crate::cli::browse) struct SnapshotPanel {
     whole: bool,
     /// Width of the diff body the view builds at.
     diff_width: usize,
+    /// Language servers the view navigates with.
+    servers: Option<(crate::lsp::Lsp, PathBuf)>,
 }
 
 impl SnapshotPanel {
@@ -150,7 +152,17 @@ impl SnapshotPanel {
             main_focused: false,
             whole: false,
             diff_width: 0,
+            servers: None,
         }
+    }
+
+    /// Navigate the snapshot with `servers`, shared with the Files panel.
+    pub(in crate::cli::browse) fn with_servers(
+        mut self,
+        servers: Option<(crate::lsp::Lsp, PathBuf)>,
+    ) -> Self {
+        self.servers = servers;
+        self
     }
 
     /// Whether this panel shows `snapshot`: the same commit, or the same
@@ -197,6 +209,7 @@ impl SnapshotPanel {
         let mut view = FilesMode::new(model, Patches::default(), None, theme, self.diff_width);
         view.label = self.snapshot.label();
         view.read_only = true;
+        view.attach_servers(self.servers.clone());
         view.show_snapshot(self.snapshot.root(), self.snapshot.commits().to_vec());
         if let Some(review) = self.review.take() {
             view.review = review;
@@ -291,6 +304,19 @@ impl Panel for SnapshotPanel {
         let command = Panel::handle_key(view, key, height);
         self.main_focused = view.main_focused();
         command
+    }
+
+    fn handle_key_event(&mut self, key: KeyEvent, height: usize) -> AppCommand {
+        let Some(view) = self.view() else {
+            return AppCommand::Continue;
+        };
+        let command = Panel::handle_key_event(view, key, height);
+        self.main_focused = view.main_focused();
+        command
+    }
+
+    fn escape(&mut self) -> bool {
+        self.view().is_some_and(Panel::escape)
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, height: usize) -> AppCommand {

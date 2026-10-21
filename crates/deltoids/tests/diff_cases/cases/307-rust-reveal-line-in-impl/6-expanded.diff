@@ -1,0 +1,51 @@
+## reveal 10
+@@ -5,13 +5,13 @@ [impl_item Cart] [function_item savings]
+ impl Cart {
+     pub fn len(&self) -> usize {
+         self.items.len()
+     }
+ 
+     pub fn total(&self) -> u32 {
+         self.items.iter().sum()
+     }
+ 
+     pub fn savings(&self) -> u32 {
+-        self.total() / 10
++        self.total() / 5
+     }
+ }
+
+## shrink 0
+@@ -14,3 +14,3 @@ [impl_item Cart] [function_item savings]
+     pub fn savings(&self) -> u32 {
+-        self.total() / 10
++        self.total() / 5
+     }
+
+## reveal 15
+(unchanged)
+
+## reveal 19
+@@ -1,21 +1,21 @@ [impl_item Cart] [function_item savings]
+ pub struct Cart {
+     items: Vec<u32>,
+ }
+ 
+ impl Cart {
+     pub fn len(&self) -> usize {
+         self.items.len()
+     }
+ 
+     pub fn total(&self) -> u32 {
+         self.items.iter().sum()
+     }
+ 
+     pub fn savings(&self) -> u32 {
+-        self.total() / 10
++        self.total() / 5
+     }
+ }
+ 
+ pub fn unrelated() -> u32 {
+     42
+ }

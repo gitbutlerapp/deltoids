@@ -60,6 +60,8 @@ pub(super) enum PaneTitle {
     Both(Column),
     /// The working tree has no staging: every change is uncommitted.
     Uncommitted,
+    /// An unchanged file a jump opened.
+    Visited,
 }
 
 /// The pane for one selection: the column it shows, its title, every file

@@ -153,6 +153,7 @@ fn change_set(model: &Model) -> ChangeSet {
             .files
             .iter()
             .zip(&model.bodies)
+            .take(model.changed_files())
             .map(|(resolved, body)| {
                 let path = display_path(&resolved.file);
                 let status = change_status(file_status(&resolved.file));
