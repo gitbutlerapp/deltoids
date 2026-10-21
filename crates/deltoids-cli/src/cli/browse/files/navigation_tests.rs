@@ -156,7 +156,12 @@ fn shop_server(uri: &dyn Fn(&str) -> String) -> Script {
             let asked = request.params["textDocument"]["uri"]
                 .as_str()
                 .unwrap_or_default();
-            let line = if asked.ends_with("main.rs") { 11 } else { 3 };
+            let from = request.params["position"]["line"].as_u64();
+            let line = if asked.ends_with("main.rs") || from == Some(11) {
+                11
+            } else {
+                3
+            };
             Reply::Result(location(cart.clone(), line))
         }
         Message::Request(request) if request.method == "textDocument/prepareCallHierarchy" => {
@@ -282,6 +287,28 @@ fn enter_on_a_call_jumps_to_its_definition_in_another_file_and_ctrl_o_returns() 
         cursor(&state),
         Some(("src/main.rs".to_string(), LineSide::New, 5))
     );
+}
+
+#[test]
+fn enter_on_a_definition_lists_its_callers_instead_of_jumping_to_itself() {
+    let Fixture {
+        mut state,
+        record,
+        dir: _dir,
+    } = fixture(|uri| shop_server(uri));
+    open(&mut state, "src/cart.rs");
+    cursor_to(&mut state, "src/cart.rs", LineSide::New, 12);
+    assert_eq!(underlined(&mut state), "savings");
+
+    press(&mut state, KeyCode::Enter);
+
+    assert_eq!(
+        cursor(&state),
+        Some(("src/cart.rs".to_string(), LineSide::New, 12))
+    );
+    assert_eq!(record.params("textDocument/prepareCallHierarchy").len(), 1);
+    let screen = test_screen::screen(&mut state).join("\n");
+    assert!(screen.contains("Callers of savings"), "{screen}");
 }
 
 #[test]

@@ -149,7 +149,8 @@ Without the key, the sidebar shows no guidance.
 
 Press `Enter` on a diff line in `deltoids tui` to go to the definition of
 the underlined symbol, and `r` to list a function's callers (`w` / `b`
-pick another symbol on the line; `Ctrl+o` goes back). A language server
+pick another symbol on the line; `Ctrl+o` goes back). On a definition,
+`Enter` lists its callers instead. A language server
 answers. deltoids starts it as soon as a file in its language shows in
 the diff pane and stops it on quit. Each file header shows the server's
 state left of the language name: `●` ready, a spinner (with a

@@ -77,6 +77,9 @@ struct Pending {
     ticket: Ticket,
     query: Query,
     name: String,
+    /// Where the symbol asked about is: an answer there is no place to go.
+    path: String,
+    line: usize,
 }
 
 /// The list of several answers.
@@ -371,6 +374,8 @@ pub(super) fn ask(state: &mut FilesMode, query: Query) {
                 ticket,
                 query,
                 name: target.name,
+                path: target.path,
+                line: target.line,
             });
         }
         Err(message) => state.status = Some(message),
@@ -547,13 +552,26 @@ pub(super) fn tick(state: &mut FilesMode) -> (bool, bool) {
 }
 
 fn answered(state: &mut FilesMode, pending: Pending, answer: Result<Vec<Found>, String>) {
-    let found = match answer {
+    let mut found = match answer {
         Ok(found) => found,
         Err(message) => {
             state.status = Some(message);
             return;
         }
     };
+    if pending.query == Query::Definition {
+        let asked = found.len();
+        found.retain(|found| found.path != pending.path || found.line != pending.line);
+        // Asked on the definition itself: who uses it is the question left.
+        if found.is_empty() && asked > 0 {
+            ask(state, Query::Callers);
+            state.status = Some(format!(
+                "Already at the definition of {}; showing its callers",
+                pending.name
+            ));
+            return;
+        }
+    }
     let mut entries: Vec<Entry> = found
         .into_iter()
         .map(|found| {
