@@ -50,8 +50,9 @@ state left of the language name: `●` ready, a spinner (with a
 percentage when the server reports one) while it starts or indexes, `✕`
 when it failed, nothing when there is no server.
 
-Navigation works on lines whose file matches the file on disk: the
-working tree, and commits or branches whose files have not changed since.
+The server reads the files on disk, so navigation works on every line of
+the working tree, and on the lines of a commit or branch that have not
+changed since (deltoids follows them when lines above moved).
 Answers inside the diff move the cursor there; a line outside the shown
 hunks opens its hunk, and a file the diff does not touch opens as a
 *visited* file.

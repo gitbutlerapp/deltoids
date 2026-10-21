@@ -312,6 +312,52 @@ fn enter_on_a_definition_lists_its_callers_instead_of_jumping_to_itself() {
 }
 
 #[test]
+fn a_version_older_than_the_disk_navigates_through_lines_that_did_not_change() {
+    let script = |uri: &dyn Fn(&str) -> String| -> Script {
+        let cart = uri("src/cart.rs");
+        Arc::new(move |message| match message {
+            Message::Request(request) if request.method == "textDocument/definition" => {
+                let from = request.params["position"]["line"].as_u64();
+                // `savings` is two lines further down on disk; asked from
+                // `main.rs` (shown line 5, disk line 7) it answers its disk
+                // line 14, and anything else lands on a line added since.
+                let line = if from == Some(6) { 13 } else { 0 };
+                Reply::Result(location(cart.clone(), line))
+            }
+            _ => Reply::Default,
+        })
+    };
+    let Fixture {
+        mut state,
+        record,
+        dir,
+    } = fixture(script);
+    for (path, text) in [("src/main.rs", MAIN_AFTER), ("src/cart.rs", CART_AFTER)] {
+        fs::write(dir.path().join(path), format!("// added\n// since\n{text}")).unwrap();
+    }
+    open(&mut state, "src/main.rs");
+    cursor_to(&mut state, "src/main.rs", LineSide::New, 5);
+    assert_eq!(underlined(&mut state), "savings");
+
+    press(&mut state, KeyCode::Enter);
+    let asked = &record.params("textDocument/definition")[0];
+    assert_eq!(
+        asked["position"]["line"],
+        json!(6),
+        "asked at the disk line"
+    );
+    assert_eq!(
+        cursor(&state),
+        Some(("src/cart.rs".to_string(), LineSide::New, 12)),
+        "landed on the shown line"
+    );
+
+    cursor_to(&mut state, "src/cart.rs", LineSide::New, 13);
+    press(&mut state, KeyCode::Enter);
+    assert!(right(&mut state).contains("src/cart.rs:1 has changed since this version"));
+}
+
+#[test]
 fn w_and_b_move_the_underline_along_the_line() {
     let Fixture {
         mut state,
@@ -421,7 +467,7 @@ fn removed_lines_and_files_changed_on_disk_say_why_they_cannot_be_asked_about() 
     open(&mut state, "src/main.rs");
     cursor_to(&mut state, "src/main.rs", LineSide::New, 5);
     press(&mut state, KeyCode::Enter);
-    assert!(right(&mut state).contains("src/main.rs has changed since this version"));
+    assert!(right(&mut state).contains("This line has changed since this version"));
     assert!(record.params("textDocument/definition").is_empty());
 }
 

@@ -28,7 +28,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use deltoids::render_tui::{
     byte_at, line_cells, pane_block_with_title_line, pane_border_color, rgb_to_color,
 };
-use deltoids::{Diff, Language, Symbols, Theme};
+use deltoids::{Diff, Language, LineMap, Symbols, Theme};
 
 use super::model::{Column, FileBody, Model};
 use super::{FilesMode, Focus};
@@ -52,6 +52,9 @@ pub(super) struct Navigation {
     root: Option<PathBuf>,
     disk: HashMap<String, Disk>,
     symbols: HashMap<String, (u64, Arc<Symbols>)>,
+    /// Per file, how its shown version lines up with the disk, keyed by
+    /// both texts' fingerprints.
+    maps: HashMap<String, ((u64, u64), Arc<LineMap>)>,
     /// The symbol picked on a line: which line, and its index there.
     picked: Option<(CommentAnchor, usize)>,
     pending: Option<Pending>,
@@ -116,13 +119,14 @@ impl Place {
     }
 }
 
-/// A file of the model, the column whose body draws its disk text, and
-/// that body's new side.
+/// A file of the model, the column whose body shows it, that body's new
+/// side, and the answer's line in what the body shows.
 #[derive(Clone, Copy)]
 struct Landing {
     index: usize,
     column: Column,
     side: LineSide,
+    line: usize,
 }
 
 /// Where a jump left from, for `Ctrl+o`.
@@ -142,8 +146,12 @@ enum Selection {
 /// The symbol a lookup asks about.
 struct Target {
     path: String,
+    /// The version the pane shows, and the symbol's line in it.
     diff: Arc<Diff>,
     line: usize,
+    /// The file on disk, which the server reads, and the line there.
+    disk: Arc<str>,
+    disk_line: usize,
     columns: Range<usize>,
     language: Language,
     name: String,
@@ -156,6 +164,7 @@ impl Navigation {
             root,
             disk: HashMap::new(),
             symbols: HashMap::new(),
+            maps: HashMap::new(),
             picked: None,
             pending: None,
             list: None,
@@ -224,17 +233,34 @@ impl Navigation {
         Some(text)
     }
 
+    /// The file on disk at `path` and, when it differs from `shown`
+    /// (the version a pane shows), a map from shown lines to disk lines.
+    /// `None` when the file is not on disk.
+    fn version(&mut self, path: &str, shown: &str) -> Option<(Arc<str>, Option<Arc<LineMap>>)> {
+        let disk = self.disk_text(path)?;
+        if *disk == *shown {
+            return Some((disk, None));
+        }
+        let key = (fingerprint(shown), fingerprint(&disk));
+        if let Some((cached, map)) = self.maps.get(path)
+            && *cached == key
+        {
+            let map = Arc::clone(map);
+            return Some((disk, Some(map)));
+        }
+        let map = Arc::new(LineMap::new(shown, &disk));
+        self.maps.insert(path.to_string(), (key, Arc::clone(&map)));
+        Some((disk, Some(map)))
+    }
+
     fn symbols(&mut self, path: &str, diff: &Diff, language: Language) -> Arc<Symbols> {
-        let text = diff.updated();
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut hasher);
-        let key = hasher.finish();
+        let key = fingerprint(diff.updated());
         if let Some((cached, symbols)) = self.symbols.get(path)
             && *cached == key
         {
             return Arc::clone(symbols);
         }
-        let symbols = Arc::new(Symbols::parse(language, text));
+        let symbols = Arc::new(Symbols::parse(language, diff.updated()));
         self.symbols
             .insert(path.to_string(), (key, Arc::clone(&symbols)));
         symbols
@@ -363,8 +389,8 @@ pub(super) fn ask(state: &mut FilesMode, query: Query) {
         Symbol {
             language: target.language,
             path: &target.path,
-            text: target.diff.updated(),
-            line: target.line,
+            text: &target.disk,
+            line: target.disk_line,
             columns: target.columns.clone(),
         },
     );
@@ -375,7 +401,7 @@ pub(super) fn ask(state: &mut FilesMode, query: Query) {
                 query,
                 name: target.name,
                 path: target.path,
-                line: target.line,
+                line: target.disk_line,
             });
         }
         Err(message) => state.status = Some(message),
@@ -611,16 +637,28 @@ fn place(state: &mut FilesMode, found: &Found) -> Place {
     let Some((diff, side)) = body(&state.model, index, column) else {
         return Place::Unreachable(format!("{} has no text to show", found.path));
     };
-    let disk = state.nav.disk_text(&found.path);
-    if disk.as_deref() != Some(diff.updated()) {
-        return Place::Unreachable(changed_since(&found.path));
-    }
+    let Some((_, map)) = state.nav.version(&found.path, diff.updated()) else {
+        return Place::Unreachable(format!("{} isn't on disk", found.path));
+    };
+    let line = match map {
+        None => found.line,
+        Some(map) => match map.backward(found.line) {
+            Some(line) => line,
+            None => {
+                return Place::Unreachable(format!(
+                    "{}:{} has changed since this version",
+                    found.path, found.line
+                ));
+            }
+        },
+    };
     let landing = Landing {
         index,
         column,
         side,
+        line,
     };
-    let anchor = anchor(&found.path, side, found.line);
+    let anchor = anchor(&found.path, side, line);
     if state.model.line(&anchor).is_some() {
         Place::Drawn(landing)
     } else {
@@ -644,16 +682,17 @@ fn column_of(model: &Model, index: usize) -> Column {
 
 /// The line of code an answer points at, trimmed, for the list.
 fn code(state: &mut FilesMode, found: &Found, place: &Place) -> String {
-    let text: Option<Arc<str>> = match place {
-        Place::Drawn(landing) | Place::Revealable(landing) => {
+    let (text, line): (Option<Arc<str>>, usize) = match place {
+        Place::Drawn(landing) | Place::Revealable(landing) => (
             body(&state.model, landing.index, landing.column)
-                .map(|(diff, _)| Arc::from(diff.updated()))
-        }
-        _ => state.nav.disk_text(&found.path),
+                .map(|(diff, _)| Arc::from(diff.updated())),
+            landing.line,
+        ),
+        _ => (state.nav.disk_text(&found.path), found.line),
     };
     text.and_then(|text| {
         text.lines()
-            .nth(found.line.saturating_sub(1))
+            .nth(line.saturating_sub(1))
             .map(|line| line.trim().to_string())
     })
     .unwrap_or_default()
@@ -662,7 +701,10 @@ fn code(state: &mut FilesMode, found: &Found, place: &Place) -> String {
 /// Act on one answer: jump to it, open its hunk, or visit its file.
 fn go(state: &mut FilesMode, entry: Entry) {
     let Entry { found, place, .. } = entry;
-    let line = found.line;
+    let line = match &place {
+        Place::Drawn(landing) | Place::Revealable(landing) => landing.line,
+        _ => found.line,
+    };
     let at = format!("{}:{line}", found.path);
     match place {
         Place::Unreachable(message) => state.status = Some(message),
@@ -698,6 +740,7 @@ fn go(state: &mut FilesMode, entry: Entry) {
                 index,
                 column: Column::Unstaged,
                 side: LineSide::New,
+                line,
             };
             jump(state, landing, anchor(&found.path, LineSide::New, line));
             state.status = Some(format!("{at}  ·  not in this diff  ·  Ctrl+o to go back"));
@@ -772,9 +815,16 @@ fn target(state: &mut FilesMode) -> Result<(Target, Vec<Range<usize>>), String> 
     if anchor.side != side {
         return Err("Removed lines aren't on disk; pick a line that is".to_string());
     }
-    if state.nav.disk_text(&anchor.path).as_deref() != Some(diff.updated()) {
-        return Err(changed_since(&anchor.path));
-    }
+    let (disk, map) = state
+        .nav
+        .version(&anchor.path, diff.updated())
+        .ok_or_else(|| format!("{} isn't on disk", anchor.path))?;
+    let disk_line = match &map {
+        None => anchor.line,
+        Some(map) => map
+            .forward(anchor.line)
+            .ok_or("This line has changed since this version")?,
+    };
     let lsp = state
         .nav
         .lsp
@@ -801,6 +851,8 @@ fn target(state: &mut FilesMode) -> Result<(Target, Vec<Range<usize>>), String> 
             path: anchor.path,
             diff,
             line: anchor.line,
+            disk,
+            disk_line,
             columns,
             language,
             name,
@@ -847,8 +899,10 @@ fn anchor(path: &str, side: LineSide, line: usize) -> CommentAnchor {
     }
 }
 
-fn changed_since(path: &str) -> String {
-    format!("{path} has changed since this version")
+fn fingerprint(text: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn diff_height(state: &FilesMode) -> usize {

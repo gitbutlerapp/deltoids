@@ -9,6 +9,7 @@ mod highlight;
 mod hunk_header;
 mod intraline;
 mod language;
+mod line_map;
 pub mod parse;
 pub mod render;
 #[cfg(feature = "html")]
@@ -28,6 +29,7 @@ pub use config::{
 };
 pub use intraline::{EmphKind, EmphSection, LineEmphasis, compute_subhunk_emphasis};
 pub use language::Language;
+pub use line_map::LineMap;
 pub use scope::{Diff, DiffLine, Hunk, HunkRun, LineKind, ScopeNode};
 pub use symbols::Symbols;
 pub use symlink::SymlinkView;
