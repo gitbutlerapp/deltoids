@@ -271,7 +271,7 @@ fn progress(token: &str, value: Value) -> Message {
 }
 
 #[test]
-fn progress_reports_starting_then_work_then_nothing() {
+fn state_goes_from_off_to_loading_with_progress_to_ready() {
     let (release, gate) = crossbeam_channel::unbounded::<Vec<Message>>();
     let script: fake::Script = Arc::new(move |message| match message {
         Message::Request(r) if r.method == "initialize" => Reply::Then(
@@ -287,12 +287,10 @@ fn progress_reports_starting_then_work_then_nothing() {
         _ => Reply::Default,
     });
     let (lsp, _) = fake::lsp(Path::new(ROOT), utf8(), script);
-    assert_eq!(lsp.progress(Language::Rust), None, "not started");
+    assert_eq!(lsp.state(Language::Rust), State::Off, "not started");
+    assert_eq!(lsp.state(Language::Json), State::Off, "no server");
     lsp.warm(Language::Rust);
-    assert_eq!(
-        lsp.progress(Language::Rust).map(|p| p.phase),
-        Some(Phase::Starting)
-    );
+    assert_eq!(lsp.state(Language::Rust), State::Loading(None));
 
     release.send(Vec::new()).unwrap();
     release
@@ -304,20 +302,15 @@ fn progress_reports_starting_then_work_then_nothing() {
             progress("index", json!({ "kind": "report", "percentage": 62 })),
         ])
         .unwrap();
-    let working = Some(Progress {
-        server: "rust-analyzer".to_string(),
-        phase: Phase::Working {
-            title: "Indexing".to_string(),
-            percent: Some(62),
-        },
-    });
-    assert!(eventually(|| lsp.progress(Language::Rust) == working));
+    assert!(eventually(
+        || lsp.state(Language::Rust) == State::Loading(Some(62))
+    ));
 
     release
         .send(vec![progress("index", json!({ "kind": "end" }))])
         .unwrap();
     let _ = lsp.ask(Query::Definition, total(MAIN));
-    assert!(eventually(|| lsp.progress(Language::Rust).is_none()));
+    assert!(eventually(|| lsp.state(Language::Rust) == State::Ready));
 }
 
 fn eventually(mut check: impl FnMut() -> bool) -> bool {
@@ -423,6 +416,7 @@ fn a_crash_fails_the_pending_query_and_the_next_one_restarts_the_server() {
         wait(&lsp, &ticket),
         Err("rust-analyzer stopped; it restarts on the next request".to_string())
     );
+    assert_eq!(lsp.state(Language::Rust), State::Failed);
     let _ = lsp.ask(Query::Definition, total(MAIN)).unwrap();
     assert_eq!(record.launches(), 2);
 }
@@ -458,6 +452,11 @@ fn a_missing_or_disabled_server_fails_the_ask() {
         go.unwrap_err(),
         "No language server for Go (deltoids-no-such-server not found)"
     );
+    assert_eq!(
+        lsp.state(Language::Go),
+        State::Off,
+        "a missing program is off"
+    );
     let python = lsp.ask(
         Query::Definition,
         symbol(Language::Python, "a.py", "go()\n", 1, "go"),
@@ -478,7 +477,7 @@ fn a_cancelled_query_is_cancelled_at_the_server_and_never_answers() {
     );
     let ticket = lsp.ask(Query::Definition, total(MAIN)).unwrap();
     assert!(eventually(|| {
-        lsp.progress(Language::Rust);
+        lsp.state(Language::Rust);
         !record.params("textDocument/definition").is_empty()
     }));
     let id = record
@@ -501,7 +500,7 @@ fn a_cancelled_query_is_cancelled_at_the_server_and_never_answers() {
 fn dropping_the_last_handle_shuts_the_servers_down() {
     let (lsp, record) = fake::lsp(Path::new(ROOT), utf8(), Arc::new(|_| Reply::Default));
     lsp.warm(Language::Rust);
-    assert!(eventually(|| { lsp.progress(Language::Rust).is_none() }));
+    assert!(eventually(|| lsp.state(Language::Rust) == State::Ready));
     let clone = lsp.clone();
     drop(lsp);
     assert!(record.params("shutdown").is_empty(), "a clone is alive");

@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI: click a directory's arrow in the Files panel to fold or unfold it.
 - TUI: double-click a branch or commit in the Branches panel to open it, as `Enter` does.
 - TUI: press `F` to collapse test, comment, and import hunks in the diff, even inside files that `f` keeps.
-- TUI: go to a symbol's definition (`Enter` or double-click) or list a function's callers (`r` or right-click) from the diff, answered by language servers such as rust-analyzer, gopls, and typescript-language-server. Answers in the diff move the cursor there, a hidden line opens its hunk, and an untouched file opens as a visited file. `Ctrl+o` goes back. `w`, `b`, `r`, and `Enter` are now reserved while the diff has focus. Configure servers with `[lsp.<language>]` in `config.toml`.
+- TUI: go to a symbol's definition (`Enter` or double-click) or list a function's callers (`r` or right-click) from the diff, answered by language servers such as rust-analyzer, gopls, and typescript-language-server. Answers in the diff move the cursor there, a hidden line opens its hunk, and an untouched file opens as a visited file. `Ctrl+o` goes back. Each file header shows its server's state next to the language: ready, loading with progress, or failed. `w`, `b`, `r`, and `Enter` are now reserved while the diff has focus. Configure servers with `[lsp.<language>]` in `config.toml`.
 
 ### Changed
 

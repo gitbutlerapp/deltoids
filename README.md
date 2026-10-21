@@ -150,8 +150,11 @@ Without the key, the sidebar shows no guidance.
 Press `Enter` on a diff line in `deltoids tui` to go to the definition of
 the underlined symbol, and `r` to list a function's callers (`w` / `b`
 pick another symbol on the line; `Ctrl+o` goes back). A language server
-answers. deltoids starts it the first time a diff in its language gets
-focus, shows its progress in the diff footer, and stops it on quit.
+answers. deltoids starts it as soon as a file in its language shows in
+the diff pane and stops it on quit. Each file header shows the server's
+state left of the language name: `●` ready, a spinner (with a
+percentage when the server reports one) while it starts or indexes, `✕`
+when it failed, nothing when there is no server.
 
 Navigation works on lines whose file matches the file on disk: the
 working tree, and commits or branches whose files have not changed since.

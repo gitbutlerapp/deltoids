@@ -71,20 +71,28 @@ pub(crate) struct Found {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Ticket(u64);
 
-/// What a language server is busy with.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Progress {
-    /// The server's program name ("rust-analyzer").
-    pub(crate) server: String,
-    pub(crate) phase: Phase,
+/// What a language's server is doing, for a status mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum State {
+    /// No server: none configured, its program is missing, or it has not
+    /// been started.
+    Off,
+    /// Starting, or reporting work such as indexing, with its percentage
+    /// when the server gives one.
+    Loading(Option<u8>),
+    /// Running and idle: lookups answer now.
+    Ready,
+    /// Stopped or crashed, or failed to start; the next lookup retries.
+    Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Phase {
+/// What a running server is busy with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
     /// Started; the handshake has not finished.
     Starting,
     /// Reporting work, such as indexing the project.
-    Working { title: String, percent: Option<u8> },
+    Working { percent: Option<u8> },
 }
 
 /// Connects a server: production spawns its process.
@@ -102,6 +110,8 @@ struct Inner {
     table: ServerTable,
     launch: Launch,
     servers: HashMap<ServerSpec, Server>,
+    /// Servers that did not start, and whether their program is missing.
+    failures: HashMap<ServerSpec, bool>,
     next_ticket: u64,
     answers: HashMap<u64, Result<Vec<Found>, String>>,
 }
@@ -126,6 +136,7 @@ impl Lsp {
             table,
             launch,
             servers: HashMap::new(),
+            failures: HashMap::new(),
             next_ticket: 1,
             answers: HashMap::new(),
         })))
@@ -190,17 +201,25 @@ impl Lsp {
         inner.answers.remove(&ticket.0);
     }
 
-    /// What `language`'s server is busy with. `None` when idle, not
-    /// running, or not configured.
-    pub(crate) fn progress(&self, language: Language) -> Option<Progress> {
+    /// What `language`'s server is doing.
+    pub(crate) fn state(&self, language: Language) -> State {
         let mut inner = self.0.borrow_mut();
         inner.pump();
-        let spec = inner.table.get(language)?;
-        let server = inner.servers.get(spec)?;
-        Some(Progress {
-            server: server.name().to_string(),
-            phase: server.phase()?,
-        })
+        let Some(spec) = inner.table.get(language) else {
+            return State::Off;
+        };
+        match inner.servers.get(spec) {
+            Some(server) if server.stopped() => State::Failed,
+            Some(server) => match server.phase() {
+                Some(Phase::Starting) => State::Loading(None),
+                Some(Phase::Working { percent }) => State::Loading(percent),
+                None => State::Ready,
+            },
+            None => match inner.failures.get(spec) {
+                Some(false) => State::Failed,
+                _ => State::Off,
+            },
+        }
     }
 
     /// Bring open documents in step with `files` (workdir-relative path,
@@ -255,8 +274,15 @@ impl Inner {
             .ok_or_else(|| format!("No language server for {}", language.name()))?;
         if self.servers.get(&spec).is_none_or(Server::stopped) {
             self.servers.remove(&spec);
-            let link = (self.launch)(&spec, &self.root)
-                .map_err(|error| start_error(language, &spec, &error))?;
+            let link = match (self.launch)(&spec, &self.root) {
+                Ok(link) => link,
+                Err(error) => {
+                    let missing = error.kind() == io::ErrorKind::NotFound;
+                    self.failures.insert(spec.clone(), missing);
+                    return Err(start_error(language, &spec, &error));
+                }
+            };
+            self.failures.remove(&spec);
             let server = Server::start(spec.name(), link, &self.root);
             self.servers.insert(spec.clone(), server);
         }

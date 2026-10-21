@@ -431,7 +431,7 @@ fn a_click_picks_a_symbol_a_double_click_goes_to_it_and_a_right_click_lists_call
 }
 
 #[test]
-fn the_footer_spins_with_the_servers_progress_until_the_lookup_and_indexing_end() {
+fn the_header_shows_indexing_progress_and_the_footer_the_lookup() {
     let script = |_: &dyn Fn(&str) -> String| -> Script {
         let progress = |value: Value| {
             Message::Notification(Notification::new(
@@ -461,28 +461,70 @@ fn the_footer_spins_with_the_servers_progress_until_the_lookup_and_indexing_end(
         ..
     } = fixture(script);
     open_without_settling(&mut state, "src/main.rs");
-    cursor_to(&mut state, "src/main.rs", LineSide::New, 5);
-    Mode::handle_key(&mut state, KeyCode::Enter, PANE_HEIGHT);
-
-    let footer = |state: &mut FilesMode| -> bool {
-        let screen = text(&test_screen::draw(state));
-        Mode::background(state, true);
-        screen.contains("definition of savings  ·  rust-analyzer indexing 62%")
-    };
     assert!(
-        eventually(|| footer(&mut state)),
-        "the footer reports the lookup"
+        eventually(|| header(&mut state, "src/main.rs").contains("62%")),
+        "the header shows indexing progress"
     );
     assert!(
         Mode::background(&mut state, true).pending,
         "the spinner ticks"
     );
 
+    cursor_to(&mut state, "src/main.rs", LineSide::New, 5);
+    Mode::handle_key(&mut state, KeyCode::Enter, PANE_HEIGHT);
+    assert!(eventually(|| {
+        let screen = text(&test_screen::draw(&mut state));
+        Mode::background(&mut state, true);
+        screen.contains("Finding definition of savings")
+    }));
+
     Mode::handle_key(&mut state, KeyCode::Esc, PANE_HEIGHT);
+    assert!(
+        eventually(|| header(&mut state, "src/main.rs").contains('●')),
+        "indexing ended: ready"
+    );
     assert!(
         eventually(|| !Mode::background(&mut state, true).pending),
         "an idle server lets the TUI rest"
     );
+}
+
+#[test]
+fn headers_show_their_server_state_before_the_diff_has_focus() {
+    let Fixture {
+        mut state,
+        dir: _dir,
+        record,
+    } = fixture(|uri| shop_server(uri));
+    assert_eq!(state.focus, Focus::Sidebar);
+    assert!(eventually(
+        || header(&mut state, "src/cart.rs").contains('●')
+    ));
+    assert_eq!(
+        record.launches(),
+        1,
+        "shown, not focused, is enough to start"
+    );
+
+    let Fixture {
+        mut state,
+        dir: _dir,
+        ..
+    } = fixture(|_| Arc::new(|_| Reply::Hangup));
+    assert!(eventually(
+        || header(&mut state, "src/cart.rs").contains('✕')
+    ));
+}
+
+/// The screen row of `path`'s file header, drawing a frame first.
+fn header(state: &mut FilesMode, path: &str) -> String {
+    let screen = text(&test_screen::draw(state));
+    Mode::background(state, true);
+    screen
+        .lines()
+        .find(|row| row.contains(path))
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Show `path`'s diff without waiting for background work to settle,

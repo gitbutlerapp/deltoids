@@ -955,6 +955,25 @@ impl DiffPane {
         (offset < body.height as usize).then_some((body, offset))
     }
 
+    /// The body rect inside `area` and, for each file header on screen,
+    /// its file and screen row. Valid after [`DiffPane::render`] into
+    /// `area`.
+    pub(super) fn file_headers(&self, area: Rect) -> (Rect, Vec<(usize, u16)>) {
+        let body = diff_scrollbar::body_area(area);
+        if self.empty {
+            return (body, Vec::new());
+        }
+        let headers = self
+            .file_starts
+            .iter()
+            .filter_map(|&(file, start)| {
+                let offset = start.checked_sub(self.cursor.scroll)?;
+                (offset < body.height as usize).then_some((file, body.y + offset as u16))
+            })
+            .collect();
+        (body, headers)
+    }
+
     /// The diff line drawn on window row `row`: the row its first row
     /// sits on, the file line it draws, and which wrapped row of it
     /// `row` is.

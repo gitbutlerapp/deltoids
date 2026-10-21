@@ -62,6 +62,11 @@ impl SyntaxBadge {
         Some(SyntaxBadge { spans, width })
     }
 
+    /// Columns the badge takes.
+    pub(in crate::cli::browse) fn width(&self) -> usize {
+        self.width
+    }
+
     /// `line` padded so the badge sits flush right within `width`, or
     /// `line` unchanged when the text and the badge do not fit side by
     /// side (the text takes priority).

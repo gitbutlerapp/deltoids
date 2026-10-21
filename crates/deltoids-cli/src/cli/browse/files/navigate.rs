@@ -35,7 +35,10 @@ use super::{FilesMode, Focus};
 use crate::cli::browse::comments::{CommentAnchor, LineSide};
 use crate::cli::browse::diff_scrollbar;
 use crate::cli::browse::double_click::DoubleClick;
-use crate::lsp::{Found, Lsp, Phase, Progress, Query, Symbol, Ticket};
+use crate::cli::browse::syntax_badge::SyntaxBadge;
+use crate::cli::browse::text::display_width;
+use crate::lsp::{Found, Lsp, Query, State, Symbol, Ticket};
+use crate::sidebar::{IconMode, display_path};
 
 /// Spinner frames, one per 100 ms.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -57,8 +60,8 @@ pub(super) struct Navigation {
     /// Paths opened as visited files, in the order they were opened.
     visited: Vec<String>,
     warmed: HashSet<Language>,
-    /// The language of the file under the cursor at the last draw.
-    language: Option<Language>,
+    /// The languages of the files the pane showed at the last draw.
+    languages: Vec<Language>,
     started: Instant,
     frame: usize,
     double_click: DoubleClick,
@@ -156,7 +159,7 @@ impl Navigation {
             back: Vec::new(),
             visited: Vec::new(),
             warmed: HashSet::new(),
-            language: None,
+            languages: Vec::new(),
             started: Instant::now(),
             frame: 0,
             double_click: DoubleClick::default(),
@@ -234,8 +237,14 @@ impl Navigation {
         symbols
     }
 
-    fn progress(&self) -> Option<Progress> {
-        self.lsp.as_ref()?.progress(self.language?)
+    /// Whether a server for a language on screen is starting or
+    /// indexing, so its mark spins.
+    fn loading(&self) -> bool {
+        self.lsp.as_ref().is_some_and(|lsp| {
+            self.languages
+                .iter()
+                .any(|&language| matches!(lsp.state(language), State::Loading(_)))
+        })
     }
 
     fn spinner(&self) -> &'static str {
@@ -528,7 +537,7 @@ pub(super) fn tick(state: &mut FilesMode) -> (bool, bool) {
         answered(state, pending, answer);
         changed = true;
     }
-    let busy = state.nav.pending.is_some() || state.nav.progress().is_some();
+    let busy = state.nav.pending.is_some() || state.nav.loading();
     if busy {
         let frame = state.nav.spinner_frame();
         changed |= frame != state.nav.frame;
@@ -836,55 +845,40 @@ fn sidebar_height(state: &FilesMode) -> usize {
 // Drawing
 // ---------------------------------------------------------------------------
 
-/// The footer while a lookup runs or the server is busy, in place of
-/// `footer` (the pane's own). `None` when idle.
-pub(super) fn footer(nav: &Navigation, footer: Option<String>) -> Option<String> {
-    let progress = nav.progress().map(|progress| {
-        let Progress { server, phase } = progress;
-        match phase {
-            Phase::Starting => format!("{server} starting"),
-            Phase::Working { title, percent } => {
-                let percent = percent.map_or(String::new(), |p| format!(" {p}%"));
-                format!("{server} {}{percent}", title.to_lowercase())
-            }
-        }
-    });
-    let spinner = nav.spinner();
-    match (&nav.pending, progress) {
-        (Some(pending), progress) => {
-            let what = match pending.query {
-                Query::Definition => "definition",
-                Query::Callers => "callers",
-            };
-            let progress = progress.map_or(String::new(), |p| format!("  ·  {p}"));
-            Some(format!(
-                "{spinner} Finding {what} of {}{progress}",
-                pending.name
-            ))
-        }
-        (None, Some(progress)) => {
-            let footer = footer.map_or(String::new(), |f| format!("  ·  {}", f.trim()));
-            Some(format!("{spinner} {progress}{footer}"))
-        }
-        (None, None) => None,
-    }
+/// The footer while a lookup runs, in place of the pane's own. `None`
+/// when no lookup is pending.
+pub(super) fn footer(nav: &Navigation) -> Option<String> {
+    let pending = nav.pending.as_ref()?;
+    let what = match pending.query {
+        Query::Definition => "definition",
+        Query::Callers => "callers",
+    };
+    Some(format!(
+        "{} Finding {what} of {}",
+        nav.spinner(),
+        pending.name
+    ))
 }
 
-/// Note the cursor file's language (for the footer's progress) and start
-/// its server when the diff has focus.
-pub(super) fn observe(state: &mut FilesMode, focused: bool) {
-    let language = cursor_anchor(state).and_then(|anchor| {
-        let index = state.model.index_of(&anchor.path)?;
-        body(&state.model, index, state.shown())?.0.language()
-    });
-    state.nav.language = language;
-    if focused
-        && let (Some(language), Some(lsp)) = (language, &state.nav.lsp)
-        && lsp.serves(language)
-        && state.nav.warmed.insert(language)
-    {
-        lsp.warm(language);
+/// Note the languages of `files` (the ones the pane shows) and start
+/// their servers, so lookups answer sooner and each header can show its
+/// server's state.
+pub(super) fn observe(state: &mut FilesMode, files: &[usize]) {
+    let column = state.shown();
+    let mut languages: Vec<Language> = files
+        .iter()
+        .filter_map(|&index| body(&state.model, index, column)?.0.language())
+        .collect();
+    languages.sort_by_key(|language| language.id());
+    languages.dedup();
+    if let Some(lsp) = &state.nav.lsp {
+        for &language in &languages {
+            if lsp.serves(language) && state.nav.warmed.insert(language) {
+                lsp.warm(language);
+            }
+        }
     }
+    state.nav.languages = languages;
 }
 
 /// Underline the picked symbol on the cursor's line, and draw the list.
@@ -910,8 +904,59 @@ pub(super) fn draw(
             }
         }
     }
+    draw_marks(state, frame, area, theme);
     if let Some(list) = state.nav.list.as_mut() {
         draw_list(frame, list, theme);
+    }
+}
+
+/// Beside each file header's language badge, its server's state: a
+/// green `●` when ready, a spinner (and percentage) while it starts or
+/// indexes, a red `✕` when it failed, nothing when off. Drawn only over
+/// blank cells, so a long path keeps priority.
+fn draw_marks(state: &FilesMode, frame: &mut ratatui::Frame<'_>, area: Rect, theme: &Theme) {
+    let Some(lsp) = &state.nav.lsp else {
+        return;
+    };
+    let column = state.shown();
+    let (body, headers) = state.pane(column).file_headers(area);
+    let icons = IconMode::from_env();
+    for (index, y) in headers {
+        let Some((diff, _)) = self::body(&state.model, index, column) else {
+            continue;
+        };
+        let Some(language) = diff.language() else {
+            continue;
+        };
+        let (text, color) = match lsp.state(language) {
+            State::Off => continue,
+            State::Ready => ("●".to_string(), theme.status_added),
+            State::Loading(percent) => {
+                let spinner = state.nav.spinner();
+                let text = percent.map_or(spinner.to_string(), |p| format!("{spinner} {p}%"));
+                (text, theme.status_partial)
+            }
+            State::Failed => ("✕".to_string(), theme.status_deleted),
+        };
+        let path = display_path(&state.model.files[index].file);
+        let Some(badge) = SyntaxBadge::new(Some(language), diff.highlight(), path, icons, theme)
+        else {
+            continue;
+        };
+        let right = (body.x + body.width) as usize;
+        let Some(end) = right.checked_sub(badge.width() + 1) else {
+            continue;
+        };
+        let Some(start) = end.checked_sub(display_width(&text)) else {
+            continue;
+        };
+        let buffer = frame.buffer_mut();
+        let blank = (start.saturating_sub(1).max(body.x as usize)..end)
+            .all(|x| buffer[(x as u16, y)].symbol() == " ");
+        if blank {
+            let style = buffer[(start as u16, y)].style().fg(rgb_to_color(color));
+            buffer.set_string(start as u16, y, text, style);
+        }
     }
 }
 

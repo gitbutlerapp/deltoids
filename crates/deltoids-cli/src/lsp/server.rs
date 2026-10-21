@@ -75,7 +75,6 @@ struct Document {
 /// One work-done progress the server reported and has not ended.
 struct Work {
     token: String,
-    title: String,
     percent: Option<u8>,
 }
 
@@ -144,10 +143,6 @@ impl Server {
         )));
         server.initialize = Some(id);
         server
-    }
-
-    pub(super) fn name(&self) -> &str {
-        &self.name
     }
 
     pub(super) fn stopped(&self) -> bool {
@@ -226,7 +221,6 @@ impl Server {
             return Some(Phase::Starting);
         }
         self.work.last().map(|work| Phase::Working {
-            title: work.title.clone(),
             percent: work.percent,
         })
     }
@@ -389,11 +383,7 @@ impl Server {
                 if let Some(at) = at {
                     self.work.remove(at);
                 }
-                self.work.push(Work {
-                    token,
-                    title: value["title"].as_str().unwrap_or_default().to_string(),
-                    percent,
-                });
+                self.work.push(Work { token, percent });
             }
             Some("report") => {
                 if let Some(at) = at {

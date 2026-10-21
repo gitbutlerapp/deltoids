@@ -258,7 +258,6 @@ impl FilesMode {
     ) {
         self.diff_rect = right;
         self.sync_header();
-        navigate::observe(self, focused);
         let mut spec = self.panes.view(self.selection(), self.column);
         if spec
             .range
@@ -267,6 +266,11 @@ impl FilesMode {
         {
             spec.title = PaneTitle::Visited;
         }
+        let shown_files: Vec<usize> = spec
+            .range
+            .clone()
+            .map(|range| spec.order[range].to_vec())
+            .unwrap_or_default();
         let pane = match spec.column {
             Column::Staged => &mut self.staged,
             Column::Unstaged => &mut self.unstaged,
@@ -289,8 +293,9 @@ impl FilesMode {
                 hide_low: self.hide_low_hunks,
             },
         );
-        let status = navigate::footer(&self.nav, pane.footer()).or(self.status.clone());
+        let status = navigate::footer(&self.nav).or(self.status.clone());
         pane.render(frame, right, focused, theme, status.as_deref());
+        navigate::observe(self, &shown_files);
         navigate::draw(self, frame, right, focused, theme);
 
         if let InputState::Commenting { anchor, buffer, .. } = &self.input {
