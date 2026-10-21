@@ -607,6 +607,7 @@ dependencies = [
  "deltoids",
  "git2",
  "jiff",
+ "libc",
  "lsp-server",
  "lsp-types",
  "notify",
