@@ -1,7 +1,7 @@
 ---
 layout: "../../layouts/DocsLayout.astro"
 title: "Install"
-description: "Install deltoids: one package, every binary."
+description: "Install deltoids with Homebrew, the shell installer, or cargo."
 ---
 
 import { SITE } from "../../data/site";
@@ -21,11 +21,12 @@ cargo install --git https://github.com/juanibiapina/deltoids deltoids-cli
 A shell installer is also published on each
 <a href={`${SITE.repo.url}/releases`}>GitHub release</a>.
 
-One package ships every binary. Run `deltoids` in a repo to open the TUI;
-pipe a diff to use it as a pager.
+The package installs one `deltoids` binary. Run it in a git repository
+to open the TUI. Pipe a diff into it to use it as a pager.
 
 ## Next
 
-Wire `deltoids` into the tool you already review code in:
-[Git](/docs/integrations/git/), [GitHub CLI](/docs/integrations/gh/), or
-[Lazygit](/docs/integrations/lazygit/).
+- Review your changes in the terminal: [TUI overview](/docs/tui/).
+- Use `deltoids` as the pager of a tool you already use:
+  [Git](/docs/integrations/git/), [GitHub CLI](/docs/integrations/gh/), or
+  [Lazygit](/docs/integrations/lazygit/).

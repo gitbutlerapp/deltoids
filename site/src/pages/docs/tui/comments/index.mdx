@@ -1,0 +1,25 @@
+---
+layout: "../../../../layouts/DocsLayout.astro"
+title: "Review comments"
+description: "Leave comments on diff lines in the deltoids TUI and copy them for a coding agent."
+---
+
+# Review comments
+
+Leave comments on diff lines while you review, then copy them all as one
+text to give to a coding agent.
+
+| Key | Action |
+| --- | --- |
+| `c` | Comment on the line under the cursor |
+| `d` | Delete the comment under the cursor |
+| `y` | Copy all comments |
+| `D` | Clear all comments |
+
+The copied text holds, for each comment, the file, the line, the quoted
+code, and your note.
+
+In the working tree, a comment follows its line while you keep editing.
+When the line itself changes, deltoids marks the comment as outdated.
+
+Comments also work in [commit and branch reviews](/docs/tui/history/).

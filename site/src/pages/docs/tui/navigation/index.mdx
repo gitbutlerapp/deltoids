@@ -1,0 +1,60 @@
+---
+layout: "../../../../layouts/DocsLayout.astro"
+title: "Code navigation"
+description: "Go to definitions and callers from the deltoids diff through language servers."
+---
+
+# Code navigation
+
+From a diff line in `deltoids tui`, you can go to the definition of a
+symbol or list the callers of a function. A language server gives the
+answers. deltoids starts the server when a file in its language shows in
+the diff pane, and stops it when you quit. To pick or turn off a server,
+see [Configuration](/docs/configuration/#language-servers).
+
+## Keys
+
+The symbol under the cursor is underlined.
+
+| Key | Action |
+| --- | --- |
+| `w` / `b` | Pick the next or previous symbol on the line |
+| `Enter` | Go to the definition of the symbol. On a definition, list its callers. |
+| `r` | List the callers of the function |
+| `Ctrl+o` | Go back to where you were before the last jump |
+| `Esc` | Cancel a lookup, or close the list of callers |
+
+| Gesture | Action |
+| --- | --- |
+| Click a symbol | Pick it |
+| Double-click a symbol | Go to its definition |
+| Right-click a symbol | List its callers |
+
+## Server state
+
+The top border of the diff pane names the file under the cursor. At the
+right, it shows the file's language and the state of its server:
+
+- `Rust ●`: the server is ready.
+- A spinner, with a percentage when the server reports one: the server
+  is starting or indexing.
+- `✕`: the server failed.
+
+When no server is configured for the language, the border shows no
+state.
+
+## Where answers go
+
+The server reads the files on disk. Navigation works on every line of
+the working tree. In a commit or branch review, it works on the lines
+that did not change since that commit. deltoids follows those lines when
+lines above them moved.
+
+- If the answer is in a shown hunk, the cursor moves there.
+- If the answer is in the file but outside the shown hunks, deltoids
+  opens the hunk that holds it.
+- If the answer is in a file that the diff does not touch, the file opens
+  as a visited file, marked `○` in the Files panel.
+
+A visited file goes away when `Ctrl+o` goes back past it, or when the
+diff holds other files, for example after a commit.

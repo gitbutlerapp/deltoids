@@ -1,0 +1,47 @@
+---
+layout: "../../../../layouts/DocsLayout.astro"
+title: "Commits and branches"
+description: "Browse branches and commits in the deltoids TUI, and review a commit or branch as one diff."
+---
+
+# Commits and branches
+
+## Branches panel
+
+Panel `[2]` lists your local branches. Press `Enter` on a branch to list
+its commits. Select a commit to preview it in the main view. The preview
+reads like `git show`: the commit id, author, date, and message, above
+the diff of every file that the commit changes. Press `Esc` to go back to
+the branch list.
+
+## Review a commit
+
+Press `Enter` on a commit, or double-click it, to open it in the Files
+panel. The review uses the same diff as the working tree, with
+[review guidance](/docs/tui/guidance/), [comments](/docs/tui/comments/),
+and [code navigation](/docs/tui/navigation/). A review is read-only, so
+stage and discard are off.
+
+The file tree starts with a row for the commit. Select that row to see
+the commit id, author, date, and full message in the main view. While
+you review, the Branches panel stays on the reviewed commit.
+
+Press `Esc` in the Files panel or in the Branches panel to close the
+review and go back to the working tree.
+
+## GitButler
+
+deltoids gives every repository that GitButler manages a GitButler view.
+This includes single-branch mode, where no `gitbutler/workspace` branch
+exists.
+
+- The Branches panel becomes a Workspace panel. It shows each stack's
+  branches with their commits, like `but status`, and ends at the common
+  base. A branch's log stops at the base.
+- Unapplied branches are listed below the stacks. Press `Enter` on an
+  unapplied branch to list its commits.
+- Press `Enter` on an applied branch to review all its commits as one
+  diff. The file tree then starts with a row that shows each commit's id,
+  author, date, and message.
+- The Files panel shows all uncommitted changes in one column. Discard
+  goes through `but`, so `but undo` brings the changes back.

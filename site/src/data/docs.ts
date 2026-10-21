@@ -31,6 +31,16 @@ export const DOCS_NAV: readonly DocsNavGroup[] = [
     items: [{ label: "Install", href: "/docs/" }],
   },
   {
+    label: "Use the TUI",
+    items: [
+      { label: "Overview", href: "/docs/tui/" },
+      { label: "Commits and branches", href: "/docs/tui/history/" },
+      { label: "Review guidance", href: "/docs/tui/guidance/" },
+      { label: "Code navigation", href: "/docs/tui/navigation/" },
+      { label: "Review comments", href: "/docs/tui/comments/" },
+    ],
+  },
+  {
     label: "Use as a pager",
     items: [
       { label: "Git", href: "/docs/integrations/git/" },

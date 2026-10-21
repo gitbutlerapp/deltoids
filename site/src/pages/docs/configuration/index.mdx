@@ -1,7 +1,7 @@
 ---
 layout: "../../../layouts/DocsLayout.astro"
 title: "Configuration"
-description: "Configure deltoids: config file location, theme, custom key commands, and language servers."
+description: "Configure deltoids: config file location, theme, custom commands, and language servers."
 ---
 
 import Note from "../../../components/docs/Note.astro";
@@ -10,6 +10,31 @@ import Note from "../../../components/docs/Note.astro";
 
 deltoids reads `$XDG_CONFIG_HOME/deltoids/config.toml`, falling back to
 `~/.config/deltoids/config.toml`.
+
+## Theme
+
+The `[theme]` section selects the light or dark palette and the syntax
+highlighting theme. The pager and `deltoids tui` both use it.
+
+```toml
+[theme]
+# "light" | "dark" | "auto" (default: auto, detected from the terminal).
+mode = "auto"
+# Syntax highlighting theme by name. Bundled themes include "TokyoNight"
+# plus every theme bat ships (e.g. "Monokai Extended", "GitHub", "Nord",
+# "Dracula").
+syntax_theme = "TokyoNight"
+```
+
+When `syntax_theme` is not set, deltoids uses `BAT_THEME`. When that is
+not set either, it uses Monokai Extended on dark and GitHub on light.
+
+In `deltoids tui`, press `t` to switch the syntax theme for the
+session. The picker starts from the theme set here.
+
+You can also override single colors of the interface, such as diff
+backgrounds, borders, and status letters, with hex values in the same
+`[theme]` section.
 
 ## Custom commands
 
@@ -45,33 +70,19 @@ work against the current selection.
   over the screen, such as an inline editor.
 </Note>
 
-Custom keys cannot override the built-in bindings (`q`, `[`, `]`, `<`,
-`>`, `?`) but can shadow a mode's own keys. Press `?` in the TUI to see
-the configured bindings in the help popup.
+Custom keys cannot override these built-in keys:
+
+- `q`, `?`, `t`, `<`, `>`, `\`, `0`, `1`, `2`, `h`, `l`, `f`, and `F`, everywhere.
+- `w`, `b`, `r`, and `Enter` in the diff.
+- `Space`, `a`, and `d` in the Files panel of the working tree.
+
+A custom key can shadow any other key. Press `?` in the TUI to see the
+configured bindings in the help popup.
 
 ## Language servers
 
-Press `Enter` on a diff line in `deltoids tui` to go to the definition of
-the underlined symbol, or `r` to list a function's callers. `w` / `b` pick
-another symbol on the line, and `Ctrl+o` goes back. On a definition,
-`Enter` lists its callers instead. A language server answers: deltoids
-starts it as soon as a file in its language shows in the diff pane and
-stops it on quit. The diff pane's top border names the
-file under the cursor and, at the right, its language and the server's
-state: `Rust ●` ready, a spinner (with a percentage when the server
-reports one) while it starts or indexes, `✕` when it failed, nothing
-when there is no server.
-
-The server reads the files on disk, so navigation works on every line of
-the working tree, and on the lines of a commit or branch that have not
-changed since (deltoids follows them when lines above moved).
-Answers inside the diff move the cursor there; a line outside the shown
-hunks opens its hunk, and a file the diff does not touch opens as a
-*visited* file, marked `○` in the sidebar. A visited file goes away when
-`Ctrl+o` goes back past it, or when the diff holds other files (after a
-commit, for example).
-
-deltoids looks for these servers on `PATH`:
+[Code navigation](/docs/tui/navigation/) asks a language server for
+definitions and callers. deltoids looks for these servers on `PATH`:
 
 | Language | Name in `[lsp.<name>]` | Server |
 | --- | --- | --- |

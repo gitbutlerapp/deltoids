@@ -1,35 +1,96 @@
 ---
-import { SITE } from "../data/site";
+import { Image } from "astro:assets";
+import { SITE, REVIEW_FEATURES } from "../data/site";
+import tuiShot from "../assets/screenshots/tui.png";
+
+function renderInline(s: string): string {
+  return s.replaceAll(/`([^`]+)`/g, "<code>$1</code>");
+}
 ---
 
 <section id="review" class="section">
   <div class="container">
     <div class="section-head">
-      <h2>Review your working tree</h2>
+      <h2>Review in your terminal</h2>
       <p>
-        Run <code>deltoids</code> in a repo to open a terminal diff
-        browser: a file sidebar beside scope-expanded, syntax-highlighted
-        diffs that refresh as files change. Stage, discard, and leave review
-        comments without leaving the TUI.
-      </p>
-      <p class="review-web">
-        No install needed to review a GitHub PR: the same
-        scope-expanded, syntax-highlighted diffs run entirely in your
-        browser. <a class="btn btn-primary" href={SITE.reviewUrl}>Try it live →</a>
+        Run <code>deltoids</code> in a repo to open the TUI. It shows your
+        working tree, branches, and commits as scope-expanded,
+        syntax-highlighted diffs that refresh as files change.
       </p>
     </div>
+
+    <figure class="proof">
+      <Image
+        src={tuiShot}
+        alt="The deltoids TUI: the Files and Local branches panels on the left, a scope-expanded Rust diff with review tags on the right"
+        widths={[800, 1200, 1600, 2400]}
+        sizes="(min-width: 1120px) 1072px, 100vw"
+        format="webp"
+        loading="lazy"
+      />
+    </figure>
+
+    <div class="features-grid review-grid">
+      {
+        REVIEW_FEATURES.map((f) => (
+          <a class="feature-card review-card" href={f.href}>
+            <span class="feature-icon">{f.keys}</span>
+            <h3>{f.title}</h3>
+            <p set:html={renderInline(f.body)} />
+          </a>
+        ))
+      }
+    </div>
+
+    <p class="review-web">
+      No install needed to review a GitHub PR: the same scope-expanded,
+      syntax-highlighted diffs run entirely in your browser.
+      <a class="btn btn-primary" href={SITE.reviewUrl}>Try it live →</a>
+    </p>
   </div>
 </section>
 
 <style>
+  .proof {
+    margin: 0 0 40px;
+  }
+
+  .proof :global(img) {
+    width: 100%;
+    height: auto;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    background: var(--bg-code);
+  }
+
+  .review-grid {
+    margin: 0 auto;
+  }
+
+  .review-card {
+    display: block;
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .review-card h3 {
+    color: var(--text);
+  }
+
+  .review-card p {
+    color: var(--text-muted);
+  }
+
   .review-web {
     max-width: 640px;
-    margin: 20px auto 0;
+    margin: 48px auto 0;
     text-align: center;
     color: var(--text-muted);
   }
 
   .review-web .btn {
-    margin-top: 14px;
+    display: flex;
+    width: fit-content;
+    margin: 14px auto 0;
   }
 </style>

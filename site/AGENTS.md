@@ -25,13 +25,14 @@ site/
 ├── astro.config.mjs       # site URL = https://deltoids.dev
 ├── public/                # served verbatim (CNAME, fonts, robots, .nojekyll)
 └── src/
-    ├── data/site.ts         # version, install commands, FAQ — single source of truth
+    ├── data/site.ts         # version, copy, TUI feature cards, install commands, FAQ — single source of truth
     ├── data/docs.ts         # docs sidebar groups + items — single source of truth
     ├── styles/global.css    # palette, layout primitives, all section styles
     ├── layouts/Base.astro   # head, nav, footer, JSON-LD schema
     ├── layouts/DocsLayout.astro # sidebar + content shell for /docs/* pages
-    ├── components/          # Hero, Features, Pager, Agents, Install, Faq, icons
+    ├── components/          # Hero, Review, Pager, Install, Faq, icons
     ├── components/docs/     # docs-only components (Note callout, ...)
+    ├── assets/screenshots/  # images run through astro:assets
     ├── pages/index.astro    # composes marketing sections
     └── pages/docs/          # docs subtree (.mdx files using DocsLayout)
 ```
@@ -75,7 +76,8 @@ After a new tag in the main project:
    and JSON-LD `softwareVersion`).
 2. If install commands changed, update `INSTALL_CARDS` in the same
    file.
-3. Skim `FAQ` in the same file against the README and CHANGELOG.
+3. Skim `FAQ` and `REVIEW_FEATURES` in the same file, and the docs under
+   `src/pages/docs/`, against the CHANGELOG.
 4. Build locally, eyeball it, push.
 
 ## Deployment
