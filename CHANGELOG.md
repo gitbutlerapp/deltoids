@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-21
+
 ### Added
 
 - TUI: a commit or branch review in the Files panel starts on a row for the commit or branch above its file tree. Selecting it shows each commit's id, author, date, and full message in the main view. While you review, the Branches panel stays on the reviewed commit or branch, and `Esc` there closes the review.
