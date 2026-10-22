@@ -401,6 +401,56 @@ fn requests_from_the_server_get_replies() {
     assert!(responses[1].response_result.is_err());
 }
 
+fn rust_analyzer_options() -> Value {
+    json!({ "cargo": { "targetDir": true }, "checkOnSave": false })
+}
+
+#[test]
+fn rust_analyzer_starts_with_its_own_target_dir_and_no_check_on_save() {
+    let (lsp, record) = fake::lsp(Path::new(ROOT), utf8(), answering("none", Value::Null));
+    lsp.warm(Language::Rust);
+    lsp.warm(Language::Go);
+    assert!(eventually(|| record.params("initialize").len() == 2));
+    let options: Vec<Option<Value>> = record
+        .params("initialize")
+        .iter()
+        .map(|params| params.get("initializationOptions").cloned())
+        .collect();
+    assert!(options.contains(&Some(rust_analyzer_options())));
+    assert!(options.contains(&None), "gopls gets no options");
+}
+
+#[test]
+fn rust_analyzer_asking_for_its_configuration_gets_the_same_options() {
+    let script: fake::Script = Arc::new(|message| match message {
+        Message::Notification(n) if n.method == "initialized" => Reply::Then(
+            vec![Message::Request(Request::new(
+                RequestId::from("config".to_string()),
+                "workspace/configuration".to_string(),
+                json!({ "items": [{ "section": "rust-analyzer" }, { "section": "other" }] }),
+            ))],
+            None,
+        ),
+        _ => Reply::Default,
+    });
+    let (lsp, record) = fake::lsp(Path::new(ROOT), utf8(), script);
+    lsp.warm(Language::Rust);
+    let reply = || {
+        record
+            .messages()
+            .into_iter()
+            .find_map(|message| match message {
+                Message::Response(response) => response.response_result.ok(),
+                _ => None,
+            })
+    };
+    assert!(eventually(|| {
+        lsp.warm(Language::Rust);
+        reply().is_some()
+    }));
+    assert_eq!(reply(), Some(json!([rust_analyzer_options(), null])));
+}
+
 #[test]
 fn a_crash_fails_the_pending_query_and_the_next_one_restarts_the_server() {
     let (lsp, record) = fake::lsp(
@@ -544,4 +594,6 @@ fn rust_analyzer_finds_a_definition_in_another_file() {
         thread::sleep(Duration::from_millis(500));
     }
     assert_eq!(last, Ok(vec![found("src/cart.rs", 1, None)]));
+    assert!(dir.path().join("target/rust-analyzer").is_dir());
+    assert!(!dir.path().join("target/debug").exists());
 }

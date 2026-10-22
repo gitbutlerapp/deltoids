@@ -80,6 +80,7 @@ crates/
       server.rs              #   one server: handshake, queue, documents, requests, progress
       transport.rs           #   child-process adapter (stdio framing via lsp-server)
       config.rs              #   [lsp.<language>] tables over built-in defaults
+                             #     (commands, rust-analyzer settings)
       position.rs            #   file URIs, UTF-8/UTF-16 columns
       fake.rs, tests.rs      #   scripted in-memory server + interface tests (one
                              #     ignored test against real rust-analyzer;

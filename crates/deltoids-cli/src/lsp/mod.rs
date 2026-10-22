@@ -283,7 +283,7 @@ impl Inner {
                 }
             };
             self.failures.remove(&spec);
-            let server = Server::start(spec.name(), link, &self.root);
+            let server = Server::start(&spec, link, &self.root);
             self.servers.insert(spec.clone(), server);
         }
         Ok(self.servers.get_mut(&spec).expect("inserted above"))

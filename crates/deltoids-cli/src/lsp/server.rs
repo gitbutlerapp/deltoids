@@ -11,6 +11,7 @@ use lsp_server::{ErrorCode, Message, Notification, Request, RequestId, Response}
 use lsp_types::{CallHierarchyIncomingCall, GotoDefinitionResponse, Location};
 use serde_json::{Value, json};
 
+use super::config::{ServerSettings, ServerSpec};
 use super::position::{self, Encoding};
 use super::transport::Link;
 use super::{Phase, Query};
@@ -82,6 +83,7 @@ pub(super) struct Server {
     name: String,
     link: Link,
     folders: Value,
+    settings: Option<ServerSettings>,
     next_id: i32,
     /// The `initialize` request, until the server answers it.
     initialize: Option<RequestId>,
@@ -95,18 +97,20 @@ pub(super) struct Server {
 }
 
 impl Server {
-    /// Start the handshake with a server on `link` for the workspace at
-    /// `root`. Messages wait in a queue until the server answers.
-    pub(super) fn start(name: String, link: Link, root: &Path) -> Self {
+    /// Start the handshake with `spec`'s server on `link` for the
+    /// workspace at `root`. Messages wait in a queue until the server
+    /// answers.
+    pub(super) fn start(spec: &ServerSpec, link: Link, root: &Path) -> Self {
         let root_uri = position::uri(root).unwrap_or_default();
         let folder_name = root
             .file_name()
             .map_or(String::new(), |name| name.to_string_lossy().into_owned());
         let folders = json!([{ "uri": root_uri, "name": folder_name }]);
         let mut server = Server {
-            name,
+            name: spec.name(),
             link,
             folders: folders.clone(),
+            settings: spec.settings.clone(),
             next_id: 1,
             initialize: None,
             encoding: Encoding::Utf16,
@@ -118,7 +122,7 @@ impl Server {
             stopped: false,
         };
         let id = server.id();
-        let params = json!({
+        let mut params = json!({
             "processId": std::process::id(),
             "clientInfo": { "name": "deltoids", "version": env!("CARGO_PKG_VERSION") },
             "rootUri": root_uri,
@@ -136,6 +140,9 @@ impl Server {
                 }
             }
         });
+        if let Some(settings) = &server.settings {
+            params["initializationOptions"] = settings.options();
+        }
         server.write(Message::Request(Request::new(
             id.clone(),
             "initialize".to_string(),
@@ -349,10 +356,7 @@ impl Server {
 
     fn reply(&mut self, request: Request) {
         let result = match request.method.as_str() {
-            "workspace/configuration" => {
-                let items = request.params["items"].as_array().map_or(0, Vec::len);
-                Some(Value::Array(vec![Value::Null; items]))
-            }
+            "workspace/configuration" => Some(self.configuration(&request.params)),
             "workspace/workspaceFolders" => Some(self.folders.clone()),
             "client/registerCapability"
             | "client/unregisterCapability"
@@ -369,6 +373,21 @@ impl Server {
             ),
         };
         self.write(Message::Response(response));
+    }
+
+    /// One answer per item: the options for this server's section,
+    /// `null` for any other.
+    fn configuration(&self, params: &Value) -> Value {
+        let items = params["items"].as_array().map_or(&[][..], Vec::as_slice);
+        items
+            .iter()
+            .map(|item| match &self.settings {
+                Some(settings) if item["section"].as_str() == Some(&settings.section) => {
+                    settings.options()
+                }
+                _ => Value::Null,
+            })
+            .collect()
     }
 
     fn progressed(&mut self, params: &Value) {

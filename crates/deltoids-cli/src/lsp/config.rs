@@ -6,18 +6,59 @@ use std::path::Path;
 
 use deltoids::Language;
 use serde::Deserialize;
+use serde_json::{Value, json};
 
-/// How to start one language server: a program and its arguments.
+/// How to start one language server: a program and its arguments, and
+/// the settings it starts with.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ServerSpec {
     pub(crate) command: Vec<String>,
+    pub(crate) settings: Option<ServerSettings>,
+}
+
+/// Options sent as `initializationOptions` and as the answer to
+/// `workspace/configuration` for `section`. Kept as JSON text so a
+/// spec stays hashable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ServerSettings {
+    pub(crate) section: String,
+    options: String,
+}
+
+impl ServerSettings {
+    fn new(section: &str, options: Value) -> Self {
+        Self {
+            section: section.to_string(),
+            options: options.to_string(),
+        }
+    }
+
+    pub(crate) fn options(&self) -> Value {
+        serde_json::from_str(&self.options).unwrap_or(Value::Null)
+    }
+}
+
+/// rust-analyzer builds in its own target directory and skips the
+/// startup `cargo check`, so it never holds the build lock the user's
+/// `cargo build` and `cargo test` need.
+fn rust_analyzer_settings() -> ServerSettings {
+    ServerSettings::new(
+        "rust-analyzer",
+        json!({ "cargo": { "targetDir": true }, "checkOnSave": false }),
+    )
 }
 
 impl ServerSpec {
     fn new(command: &[&str]) -> Self {
         Self {
             command: command.iter().map(|part| part.to_string()).collect(),
+            settings: None,
         }
+    }
+
+    fn with_settings(mut self, settings: ServerSettings) -> Self {
+        self.settings = Some(settings);
+        self
     }
 
     /// The program's file name, for messages ("rust-analyzer").
@@ -43,7 +84,10 @@ impl ServerTable {
         let typescript = ServerSpec::new(&["typescript-language-server", "--stdio"]);
         let clangd = ServerSpec::new(&["clangd"]);
         let servers = [
-            (Language::Rust, ServerSpec::new(&["rust-analyzer"])),
+            (
+                Language::Rust,
+                ServerSpec::new(&["rust-analyzer"]).with_settings(rust_analyzer_settings()),
+            ),
             (Language::Go, ServerSpec::new(&["gopls"])),
             (Language::TypeScript, typescript.clone()),
             (Language::Tsx, typescript.clone()),
@@ -81,8 +125,8 @@ impl ServerTable {
     }
 
     /// The defaults overlaid by the `[lsp.<language>]` tables of a
-    /// `config.toml` body. `command` replaces a server, `enabled = false`
-    /// removes it. Unknown languages and empty commands are ignored, and
+    /// `config.toml` body. `command` replaces a server's program and
+    /// keeps its settings, `enabled = false` removes it. Unknown languages and empty commands are ignored, and
     /// a file that does not parse keeps the defaults.
     pub(crate) fn parse(text: &str) -> Self {
         let mut table = Self::defaults();
@@ -98,7 +142,13 @@ impl ServerTable {
                 continue;
             }
             if let Some(command) = raw.command.filter(|command| !command.is_empty()) {
-                table.servers.insert(language, ServerSpec { command });
+                let settings = table
+                    .servers
+                    .remove(&language)
+                    .and_then(|spec| spec.settings);
+                table
+                    .servers
+                    .insert(language, ServerSpec { command, settings });
             }
         }
         table
@@ -175,6 +225,22 @@ mod tests {
             command(&table, Language::Rust),
             Some(vec!["rust-analyzer".to_string()])
         );
+    }
+
+    #[test]
+    fn replacing_the_rust_command_keeps_the_rust_analyzer_settings() {
+        let defaults = ServerTable::defaults();
+        let table = ServerTable::parse(
+            "[lsp.rust]\ncommand = [\"rustup\", \"run\", \"stable\", \"rust-analyzer\"]\n",
+        );
+        let rust = table.get(Language::Rust).unwrap();
+        assert_eq!(rust.command[0], "rustup");
+        assert!(rust.settings.is_some());
+        assert_eq!(
+            rust.settings,
+            defaults.get(Language::Rust).unwrap().settings
+        );
+        assert_eq!(table.get(Language::Go).unwrap().settings, None);
     }
 
     #[test]

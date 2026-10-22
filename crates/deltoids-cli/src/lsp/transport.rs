@@ -153,6 +153,7 @@ mod tests {
             command: ["sh", "-c", "sleep 300 & echo $! >&2; wait"]
                 .map(String::from)
                 .to_vec(),
+            settings: None,
         };
         let mut link = spawn(&spec, Path::new("/")).unwrap();
         let started = Instant::now() + Duration::from_secs(5);

@@ -97,6 +97,10 @@ definitions and callers. deltoids looks for these servers on `PATH`:
 | Java | `java` | `jdtls` |
 | Kotlin | `kotlin` | `kotlin-language-server` |
 
+deltoids starts rust-analyzer with its own target directory
+(`target/rust-analyzer`) and without check on save, so it never holds
+up `cargo build` or `cargo test`.
+
 An `[lsp.<name>]` table replaces a server or turns it off. The other
 languages deltoids understands (`css`, `hcl`, `json`, `markdown`,
 `sql`, `toml`, `yaml`) can get a server the same way:

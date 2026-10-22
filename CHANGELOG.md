@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - TUI: remove the panel numbers and the `0`, `1`, and `2` keys. Click the main view to focus it. Custom commands can now use these keys.
 
+### Fixed
+
+- TUI: rust-analyzer started for code navigation no longer makes `cargo build` and `cargo test` wait. It builds in its own `target/rust-analyzer` directory and skips its startup `cargo check`.
+
 ## [0.16.0] - 2026-10-21
 
 ### Added
