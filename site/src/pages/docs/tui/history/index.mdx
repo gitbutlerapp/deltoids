@@ -8,8 +8,8 @@ description: "Browse branches and commits in the deltoids TUI, and review a comm
 
 ## Branches panel
 
-Panel `[2]` lists your local branches. Press `Enter` on a branch to list
-its commits. Select a commit to preview it in the main view. The preview
+The Local branches panel lists your local branches. Press `Tab` to show
+it, or click its tab. Press `Enter` on a branch to list its commits. Select a commit to preview it in the main view. The preview
 reads like `git show`: the commit id, author, date, and message, above
 the diff of every file that the commit changes. Press `Esc` to go back to
 the branch list.
@@ -24,10 +24,10 @@ stage and discard are off.
 
 The file tree starts with a row for the commit. Select that row to see
 the commit id, author, date, and full message in the main view. While
-you review, the Branches panel stays on the reviewed commit.
+you review, the review is the only tab in the left column.
 
-Press `Esc` in the Files panel or in the Branches panel to close the
-review and go back to the working tree.
+Press `Esc` to close the review and go back to the Branches panel, still
+on the reviewed commit. Press `Tab` to see the working tree again.
 
 ## GitButler
 

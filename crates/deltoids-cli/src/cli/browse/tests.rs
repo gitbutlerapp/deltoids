@@ -444,7 +444,10 @@ fn loading_frame_shows_sidebar_title_and_message() {
         text.contains("Loading"),
         "loading message missing: {text:?}"
     );
-    assert!(text.contains("Files"), "sidebar title missing: {text:?}");
+    assert!(
+        text.contains("─Loading─"),
+        "sidebar title missing: {text:?}"
+    );
 }
 
 fn custom_command(key: char, command: &str, subprocess: bool) -> CustomCommand {

@@ -27,19 +27,20 @@ mouse gestures.
 
 ## Panels
 
-The layout follows lazygit. Numbered panels stack on the left. The main
-view on the right shows what the focused panel selects.
+The layout follows lazygit. The side panels share the left
+column as tabs: the column shows one panel at a time, and its border
+lists every tab. The main view on the right shows what the side panel
+selects.
 
 | Panel | Shows |
 | --- | --- |
-| `[1]` Files | The changed files in the working tree. The panel hides when the tree has no changes and no review is open. |
-| `[2]` Local branches | Your branches and their commits. See [Commits and branches](/docs/tui/history/). |
-| `[0]` Main view | The diff of the selected file, the log of a branch, or a commit. |
+| Files | The changed files in the working tree. The tab hides when the tree has no changes and no review is open. |
+| Local branches | Your branches and their commits. See [Commits and branches](/docs/tui/history/). |
+| Main view | The diff of the selected file, the log of a branch, or a commit. |
 
 | Key | Action |
 | --- | --- |
-| `1` / `2` / `0` | Focus a panel or the main view |
-| `Tab` / `Shift+Tab`, `h` / `l` | Next or previous side panel |
+| `Tab` / `Shift+Tab`, `h` / `l` | Next or previous side panel tab |
 | `Enter` | Open a file's diff, a branch, or a commit |
 | `Esc` | Back out, or close a review |
 | `j` / `k` | Move in a list, or between diff lines |
@@ -96,6 +97,7 @@ or drag the divider. To set a default theme, see
 | Gesture | Action |
 | --- | --- |
 | Click | Focus the panel under the pointer |
+| Click a tab | Show its side panel |
 | Click a file | Select it |
 | Click `▶` / `▼` | Fold or unfold a directory |
 | Click a diff line | Move the cursor there |

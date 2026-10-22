@@ -15,9 +15,7 @@
 //! the branch's commits in the same panel, newest first and loaded a page
 //! at a time, and the main view previews the selected commit's diff.
 //! `Esc` steps back up to the branches, keeping the selection. A double
-//! click on a branch or commit does what `Enter` does on it. While the
-//! Files panel shows a review, the list stays on the reviewed row: keys,
-//! clicks, and the wheel leave it there ([`History::lock_for_review`]).
+//! click on a branch or commit does what `Enter` does on it.
 //!
 //! The lists are a snapshot; [`History::refresh`] re-reads them and keeps
 //! each selection on the same branch or commit.
@@ -144,8 +142,6 @@ pub(super) struct History {
     preview: Option<SnapshotPanel>,
     /// A review `Enter` asked for, until the workspace takes it.
     review_request: Option<Snapshot>,
-    /// The Files panel shows a review: the list stays on its row.
-    reviewing: bool,
     double_click: DoubleClick,
     /// Seconds since the epoch at the last read; commit ages count from
     /// here.
@@ -187,7 +183,6 @@ impl History {
             commits: None,
             preview: None,
             review_request: None,
-            reviewing: false,
             double_click: DoubleClick::default(),
             now: now(),
             side_rect: Rect::default(),
@@ -314,12 +309,6 @@ impl History {
         self.review_request.take()
     }
 
-    /// Keep the list on the reviewed row while the Files panel shows a
-    /// review, which it opened from the selected row.
-    pub(super) fn lock_for_review(&mut self, reviewing: bool) {
-        self.reviewing = reviewing;
-    }
-
     fn move_list(&mut self, key: KeyCode, height: usize) {
         match self.screen {
             Screen::Branches => {
@@ -393,7 +382,7 @@ impl History {
         &mut self,
         frame: &mut Frame<'_>,
         area: Rect,
-        number: char,
+        title: Line<'static>,
         focused: bool,
         theme: &Theme,
     ) {
@@ -408,12 +397,7 @@ impl History {
             Err(err) => Err(err.clone()),
         };
         let chrome = Chrome {
-            title: panel_title(
-                pane_border_color(focused, theme),
-                number,
-                &list.label,
-                theme,
-            ),
+            title,
             footer,
             focused,
             highlight: true,
@@ -434,7 +418,7 @@ impl History {
             None => Vec::new(),
         };
         let color = pane_border_color(focused, theme);
-        let block = pane_block_with_title_line(panel_title(color, '0', "Log", theme), color, None);
+        let block = pane_block_with_title_line(panel_title(color, "Log", theme), color, None);
         frame.render_widget(Paragraph::new(lines).block(block), area);
     }
 
@@ -459,7 +443,7 @@ impl History {
         }
         let color = pane_border_color(focused, theme);
         let text = if selected { "Loading…" } else { "" };
-        let block = pane_block_with_title_line(panel_title(color, '0', "Diff", theme), color, None);
+        let block = pane_block_with_title_line(panel_title(color, "Diff", theme), color, None);
         let muted = Style::default().fg(rgb_to_color(theme.muted));
         frame.render_widget(Paragraph::new(text).style(muted).block(block), area);
     }
@@ -508,27 +492,33 @@ impl History {
 }
 
 impl Panel for History {
+    fn label(&self) -> String {
+        match (self.screen, &self.commits) {
+            (Screen::Commits, Some(list)) => list.label.clone(),
+            _ => self.label.to_string(),
+        }
+    }
+
     fn draw_side(
         &mut self,
         frame: &mut Frame<'_>,
         area: Rect,
-        number: char,
+        title: Line<'static>,
         focused: bool,
         theme: &Theme,
     ) {
         self.side_rect = area;
         match self.screen {
             Screen::Branches => {
-                let color = pane_border_color(focused, theme);
                 let chrome = Chrome {
-                    title: panel_title(color, number, self.label, theme),
+                    title,
                     footer: None,
                     focused,
                     highlight: true,
                 };
                 self.draw_branches(frame, area, chrome, theme);
             }
-            Screen::Commits => self.draw_commits(frame, area, number, focused, theme),
+            Screen::Commits => self.draw_commits(frame, area, title, focused, theme),
         }
     }
 
@@ -573,9 +563,6 @@ impl Panel for History {
                 Screen::Branches | Screen::Commits => self.forward_key(key, height),
             };
         }
-        if self.reviewing && !matches!(key, KeyCode::Enter | KeyCode::Char('J' | 'K')) {
-            return AppCommand::Continue;
-        }
         match key {
             KeyCode::Esc => self.screen = Screen::Branches,
             KeyCode::Enter => self.open_selected(),
@@ -616,12 +603,12 @@ impl Panel for History {
         let scroll = |history: &mut Self, key| {
             if in_main {
                 history.scroll_log(key, height);
-            } else if !history.reviewing {
+            } else {
                 history.move_list(key, height);
             }
         };
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) if !in_main && !self.reviewing => {
+            MouseEventKind::Down(MouseButton::Left) if !in_main => {
                 if self.click_row(mouse.row).is_some() && double {
                     self.open_selected();
                 }

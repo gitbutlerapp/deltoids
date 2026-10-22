@@ -16,6 +16,7 @@ use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
+use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use deltoids::render_tui::{pane_block_with_title_line, pane_border_color, rgb_to_color};
@@ -228,13 +229,12 @@ impl SnapshotPanel {
         self.view.as_ref()?.as_ref().ok()
     }
 
-    /// `Loading…`, or the build's error, in a pane titled `label`.
+    /// `Loading…`, or the build's error, in a pane under `title`.
     fn draw_message(
         &self,
         frame: &mut Frame<'_>,
         area: Rect,
-        number: char,
-        label: &str,
+        title: Line<'static>,
         focused: bool,
         theme: &Theme,
     ) {
@@ -243,29 +243,31 @@ impl SnapshotPanel {
             _ => "Loading…".to_string(),
         };
         let color = pane_border_color(focused, theme);
-        let block =
-            pane_block_with_title_line(panel_title(color, number, label, theme), color, None);
+        let block = pane_block_with_title_line(title, color, None);
         let muted = Style::default().fg(rgb_to_color(theme.muted));
         frame.render_widget(Paragraph::new(text).style(muted).block(block), area);
     }
 }
 
 impl Panel for SnapshotPanel {
+    fn label(&self) -> String {
+        self.snapshot.label()
+    }
+
     fn draw_side(
         &mut self,
         frame: &mut Frame<'_>,
         area: Rect,
-        number: char,
+        title: Line<'static>,
         focused: bool,
         theme: &Theme,
     ) {
         self.adopt(theme);
         if let Some(view) = self.view() {
-            view.draw_side(frame, area, number, focused, theme);
+            view.draw_side(frame, area, title, focused, theme);
             return;
         }
-        let title = self.snapshot.label();
-        self.draw_message(frame, area, number, &title, focused, theme);
+        self.draw_message(frame, area, title, focused, theme);
     }
 
     fn draw_main(
@@ -281,7 +283,10 @@ impl Panel for SnapshotPanel {
         self.adopt(theme);
         match self.view() {
             Some(view) => view.draw_main(frame, area, focused, layout, theme, budget),
-            None => self.draw_message(frame, area, '0', "Diff", focused, theme),
+            None => {
+                let title = panel_title(pane_border_color(focused, theme), "Diff", theme);
+                self.draw_message(frame, area, title, focused, theme);
+            }
         }
     }
 

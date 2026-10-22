@@ -1,8 +1,8 @@
 //! The scrolling TUI opened by `deltoids tui`.
 //!
-//! A lazygit-style layout: numbered side panels stacked in the left column
-//! (the working-tree files of [`files::FilesMode`] and the local branches
-//! of [`history::History`]) and the main view on the
+//! A lazygit-style layout: side panels shown one at a time as tabs of
+//! the left column (the working-tree files of [`files::FilesMode`] and
+//! the local branches of [`history::History`]) and the main view on the
 //! right. [`workspace::Workspace`] lays them out and routes input; each
 //! panel sits behind [`panel::Panel`].
 //!
@@ -816,8 +816,9 @@ impl Shell {
     }
 }
 
-/// Render the loading frame shown before the mode is built: the sidebar
-/// title plus a centered `Loading…` message in both columns.
+/// Render the loading frame shown before the mode is built: the left
+/// column titled `Loading`, and a centered `Loading…` message in the
+/// main view.
 fn draw_loading(frame: &mut ratatui::Frame<'_>, left: Rect, right: Rect, theme: &Theme) {
     let border = rgb_to_color(theme.border);
     let muted = Style::default().fg(rgb_to_color(theme.muted));
@@ -827,15 +828,9 @@ fn draw_loading(frame: &mut ratatui::Frame<'_>, left: Rect, right: Rect, theme: 
             .alignment(Alignment::Center)
             .block(block)
     };
-    frame.render_widget(
-        loading(pane_block_with_title_line(
-            panel::panel_title(border, '1', "Files", theme),
-            border,
-            None,
-        )),
-        left,
-    );
-    frame.render_widget(loading(pane_block("─[0]─Diff─", border)), right);
+    let (title, _) = panel::tab_strip(border, &["Loading".to_string()], 0, theme);
+    frame.render_widget(pane_block_with_title_line(title, border, None), left);
+    frame.render_widget(loading(pane_block("─Diff─", border)), right);
 }
 
 /// Toggle the diff change-layout: `Grouped ⇆ interleaved`. Interleaved uses

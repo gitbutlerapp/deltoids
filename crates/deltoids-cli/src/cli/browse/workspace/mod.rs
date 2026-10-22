@@ -1,7 +1,9 @@
 //! The root mode the shell drives: lazygit's layout.
 //!
-//! The left column stacks two numbered side panels; the right pane is the
-//! main view `[0]`, showing whatever the current side panel drives:
+//! The left column shows one of two side panels at full height, as tabs:
+//! its top border lists every shown panel's tab, the current one in the
+//! accent. The right pane is the main view, showing whatever the current
+//! side panel drives:
 //!
 //! 1. Files: the working-tree file tree; main shows its diff. While a
 //!    review of a commit or a branch is open, the review's files and
@@ -10,33 +12,33 @@
 //!    `but status`. Main shows the selected branch's log or commit's
 //!    diff. Drills down into a branch's commits (main: the selected
 //!    commit's diff). `Enter` on a commit, or on an applied GitButler
-//!    branch, opens its review in Files. While Files shows a review,
-//!    Branches stays on the reviewed row, and `Esc` there closes the
-//!    review.
+//!    branch, opens its review in Files.
 //!
-//! Files shows only while the working tree has changes (or is still
+//! Files has a tab only while the working tree has changes (or is still
 //! loading, or failed to build) or a review is open; otherwise Branches
-//! fills the column and keeps focus. Panel numbers stay fixed, so `1`
-//! does nothing while Files is hidden.
+//! is the only tab and keeps focus. While a review is open it is the
+//! only tab: `Esc` closes it and returns to Branches, still on the
+//! reviewed row.
 //!
-//! Focus is on one side panel or on the main view. Files takes two
-//! thirds of the column and Branches one third. `1`/`2` focus a side
-//! panel and `0` the main view; `Tab`/`Shift+Tab`, `h`/`l`, and the
-//! arrows switch side panels. `Enter` on a file focuses its diff, and
-//! `Esc` leaves the main view. Every other key, `Tab` in the main view
-//! included, goes to the current panel, which owns both of its halves
-//! through the [`Panel`] seam.
+//! Focus is on the current side panel or on the main view.
+//! `Tab`/`Shift+Tab`, `h`/`l`, the arrows, and a click on a tab's name
+//! switch side panels. `Enter` on a file focuses its diff, a click
+//! focuses the half under the pointer, and `Esc` leaves the main view.
+//! Every other key, `Tab` in the main view included, goes to the current
+//! panel, which owns both of its halves through the [`Panel`] seam.
 //!
 //! The working tree is the one watched source. A reload rebuilds its
 //! diff and re-reads the branches.
 
 use std::ffi::OsString;
+use std::ops::Range;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
+use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
+use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use deltoids::render_tui::{pane_block_with_title_line, pane_border_color, rgb_to_color};
@@ -45,7 +47,7 @@ use deltoids::{ChangeLayout, Theme};
 use super::files::{FilesMode, SnapshotPanel};
 use super::history::History;
 use super::mode::{AppCommand, BackgroundWork, DrawBudget, Mode, Viewport};
-use super::panel::{Panel, panel_title};
+use super::panel::{Panel, panel_title, tab_strip};
 use super::vcs::Vcs;
 use super::watch::ChangeReceiver;
 
@@ -66,15 +68,6 @@ impl Side {
             .expect("listed")
     }
 
-    fn number(self) -> char {
-        char::from(b'1' + self.index() as u8)
-    }
-
-    fn from_number(number: char) -> Option<Self> {
-        let index = number.to_digit(10)?.checked_sub(1)?;
-        Self::ALL.get(index as usize).copied()
-    }
-
     /// The panel `step` places down the column, wrapping around.
     fn step(self, step: isize) -> Self {
         let len = Self::ALL.len() as isize;
@@ -90,7 +83,9 @@ pub(super) struct Workspace {
     /// The side panel that drives the main view.
     side: Side,
     main_focused: bool,
-    side_rects: [Rect; 2],
+    side_rect: Rect,
+    /// Each shown tab's columns on the side panel's top border.
+    tab_hits: Vec<(Side, Range<u16>)>,
     main_rect: Rect,
     /// The `but` program the branches panel runs, when not the one on
     /// `PATH`.
@@ -109,7 +104,8 @@ impl Workspace {
             branches: None,
             side: Side::Files,
             main_focused: false,
-            side_rects: [Rect::default(); 2],
+            side_rect: Rect::default(),
+            tab_hits: Vec::new(),
             main_rect: Rect::default(),
             but,
         };
@@ -155,7 +151,10 @@ impl Workspace {
     }
 
     fn shows(&self, side: Side) -> bool {
-        side != Side::Files || self.review.is_some() || !self.files.is_clean()
+        match side {
+            Side::Files => self.review.is_some() || !self.files.is_clean(),
+            Side::Branches => self.review.is_none(),
+        }
     }
 
     /// Replace the startup placeholder with the built working tree and
@@ -167,12 +166,12 @@ impl Workspace {
     }
 
     /// Give `side` focus, on its side panel or its main view. A hidden
-    /// panel hands focus to the Branches side panel.
+    /// panel hands focus to the other side panel, which then shows.
     fn focus(&mut self, side: Side, main: bool) {
         let (side, main) = if self.shows(side) {
             (side, main)
         } else {
-            (Side::Branches, false)
+            (side.step(1), false)
         };
         self.side = side;
         self.main_focused = main;
@@ -217,14 +216,9 @@ impl Workspace {
         self.focus(Side::Files, false);
     }
 
-    /// Show `review` in the Files panel, or the working tree for `None`,
-    /// and lock the branches panel on the reviewed row while a review shows.
+    /// Show `review` in the Files panel, or the working tree for `None`.
     fn set_review(&mut self, review: Option<SnapshotPanel>) {
         self.review = review;
-        let reviewing = self.review.is_some();
-        if let Some(branches) = self.branches.as_mut() {
-            branches.lock_for_review(reviewing);
-        }
         self.settle_focus();
     }
 
@@ -240,8 +234,42 @@ impl Workspace {
         if self.main_focused {
             main
         } else {
-            inner_height(self.side_rects[self.side.index()])
+            inner_height(self.side_rect)
         }
+    }
+
+    /// The side panel whose tab sits under `position`.
+    fn tab_at(&self, position: Position) -> Option<Side> {
+        if position.y != self.side_rect.y || position.x + 1 >= self.side_rect.right() {
+            return None;
+        }
+        self.tab_hits
+            .iter()
+            .find(|(_, columns)| columns.contains(&position.x))
+            .map(|&(side, _)| side)
+    }
+
+    /// The tab strip titling the side panel, recording where each tab
+    /// lands for clicks.
+    fn tab_title(&mut self, area: Rect, focused: bool, theme: &Theme) -> Line<'static> {
+        let shown: Vec<Side> = Side::ALL.into_iter().filter(|&s| self.shows(s)).collect();
+        let tabs: Vec<String> = shown
+            .iter()
+            .map(|&side| {
+                self.panel_ref(side)
+                    .map_or_else(|| "Local branches".to_string(), Panel::label)
+            })
+            .collect();
+        let current = shown.iter().position(|&s| s == self.side).unwrap_or(0);
+        let color = pane_border_color(focused, theme);
+        let (title, ranges) = tab_strip(color, &tabs, current, theme);
+        let left = area.x + 1;
+        self.tab_hits = shown
+            .into_iter()
+            .zip(ranges)
+            .map(|(side, columns)| (side, left + columns.start..left + columns.end))
+            .collect();
+        title
     }
 }
 
@@ -271,26 +299,21 @@ impl Mode for Workspace {
         theme: &Theme,
         budget: DrawBudget,
     ) {
-        let shows_files = self.shows(Side::Files);
-        self.side_rects = side_layout(left, shows_files);
+        self.side_rect = left;
         self.main_rect = right;
         let (current, main_focused) = (self.side, self.main_focused);
-        for side in Side::ALL {
-            if side == Side::Files && !shows_files {
-                continue;
-            }
-            let area = self.side_rects[side.index()];
-            let focused = side == current && !main_focused;
-            match self.panel(side) {
-                Some(panel) => panel.draw_side(frame, area, side.number(), focused, theme),
-                None => {
-                    draw_no_repository(frame, area, side.number(), "Local branches", focused, theme)
-                }
-            }
+        let title = self.tab_title(left, !main_focused, theme);
+        match self.panel(current) {
+            Some(panel) => panel.draw_side(frame, left, title, !main_focused, theme),
+            None => draw_no_repository(frame, left, title, !main_focused, theme),
         }
         match self.panel(current) {
             Some(panel) => panel.draw_main(frame, right, main_focused, layout, theme, budget),
-            None => draw_no_repository(frame, right, '0', "Log", main_focused, theme),
+            None => {
+                let color = pane_border_color(main_focused, theme);
+                let title = panel_title(color, "Log", theme);
+                draw_no_repository(frame, right, title, main_focused, theme);
+            }
         }
     }
 
@@ -316,16 +339,8 @@ impl Mode for Workspace {
         let side = self.side;
         match key {
             KeyCode::Esc if self.panel(side).is_some_and(|panel| panel.escape()) => {}
-            KeyCode::Char('0') => self.focus(side, true),
-            KeyCode::Char(n) if Side::from_number(n).is_some() => {
-                self.focus(Side::from_number(n).expect("checked by guard"), false);
-            }
             KeyCode::Esc if self.main_focused => self.focus(side, false),
-            KeyCode::Esc if side == Side::Files && self.review.is_some() => {
-                self.set_review(None);
-                self.focus(Side::Files, false);
-            }
-            KeyCode::Esc if side == Side::Branches && self.review.is_some() => {
+            KeyCode::Esc if self.review.is_some() => {
                 self.set_review(None);
                 self.focus(Side::Branches, false);
             }
@@ -341,7 +356,7 @@ impl Mode for Workspace {
     }
 
     fn reserves_key(&self, key: KeyCode) -> bool {
-        matches!(key, KeyCode::Char('0'..='2' | 'h' | 'l'))
+        matches!(key, KeyCode::Char('h' | 'l'))
             || self
                 .panel_ref(self.side)
                 .is_some_and(|panel| panel.reserves_key(key))
@@ -363,28 +378,30 @@ impl Mode for Workspace {
         }
     }
 
-    /// A click focuses the half under the pointer; the event then goes
-    /// to the panel that owns that half. The wheel scrolls whatever is
-    /// under the pointer without moving focus.
+    /// A click on a tab's name shows and focuses its side panel. Any
+    /// other click focuses the half under the pointer; the event then
+    /// goes to the panel that owns that half. The wheel scrolls whatever
+    /// is under the pointer without moving focus.
     fn handle_mouse(&mut self, mouse: MouseEvent, height: usize) -> AppCommand {
         if self.captures_text_input() {
             return AppCommand::Continue;
         }
         let position = Position::new(mouse.column, mouse.row);
         let click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+        if click && let Some(side) = self.tab_at(position) {
+            self.focus(side, false);
+            return AppCommand::Continue;
+        }
         let (side, panel_height) = if self.main_rect.contains(position) {
             if click {
                 self.focus(self.side, true);
             }
             (self.side, height)
-        } else if let Some(side) = Side::ALL
-            .into_iter()
-            .find(|side| self.side_rects[side.index()].contains(position))
-        {
+        } else if self.side_rect.contains(position) {
             if click {
-                self.focus(side, false);
+                self.focus(self.side, false);
             }
-            (side, inner_height(self.side_rects[side.index()]))
+            (self.side, inner_height(self.side_rect))
         } else {
             return AppCommand::Continue;
         };
@@ -427,20 +444,6 @@ impl Mode for Workspace {
     }
 }
 
-/// Split the left column into the side panels: two thirds for Files,
-/// one third for Branches, or all of it for Branches when Files is
-/// hidden.
-fn side_layout(area: Rect, shows_files: bool) -> [Rect; 2] {
-    if !shows_files {
-        return [Rect::default(), area];
-    }
-    let rects = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Fill(2), Constraint::Fill(1)])
-        .split(area);
-    [rects[0], rects[1]]
-}
-
 fn inner_height(area: Rect) -> usize {
     area.height.saturating_sub(2) as usize
 }
@@ -448,13 +451,12 @@ fn inner_height(area: Rect) -> usize {
 fn draw_no_repository(
     frame: &mut Frame<'_>,
     area: Rect,
-    number: char,
-    label: &str,
+    title: Line<'static>,
     focused: bool,
     theme: &Theme,
 ) {
     let color = pane_border_color(focused, theme);
-    let block = pane_block_with_title_line(panel_title(color, number, label, theme), color, None);
+    let block = pane_block_with_title_line(title, color, None);
     let muted = Style::default().fg(rgb_to_color(theme.muted));
     frame.render_widget(
         Paragraph::new("Not a git repository.")

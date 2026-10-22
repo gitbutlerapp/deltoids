@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- TUI: the Files and Branches panels share the left column as tabs, each at full height. The panel's border lists both tabs; press `Tab`, or click a tab, to switch.
+- TUI: a commit or branch review is the only tab while it is open. `Esc` closes it and returns to the Branches panel.
+
+### Removed
+
+- TUI: remove the panel numbers and the `0`, `1`, and `2` keys. Click the main view to focus it. Custom commands can now use these keys.
+
 ## [0.16.0] - 2026-10-21
 
 ### Added

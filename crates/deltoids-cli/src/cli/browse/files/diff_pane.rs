@@ -523,7 +523,7 @@ fn file_label(model: &Model, index: usize) -> String {
     }
 }
 
-/// The pane's title naming file `index`: `─[0] path ─`, with the
+/// The pane's title naming file `index`: `─path ─`, with the
 /// staging tabs when the selection has both columns. The label shortens
 /// from the left, `…/files/navigate.rs`, to stay within `budget` columns.
 pub(super) fn file_heading(
@@ -538,9 +538,9 @@ pub(super) fn file_heading(
         _ => None,
     };
     let tabs_width = if tabs.is_some() { 22 } else { 0 };
-    let room = budget.saturating_sub(7 + tabs_width);
+    let room = budget.saturating_sub(3 + tabs_width);
     let mut spans = vec![
-        Span::raw("─[0] "),
+        Span::raw("─"),
         Span::styled(
             shorten_left(&file_label(model, index), room),
             Style::default().add_modifier(Modifier::BOLD),
@@ -1399,11 +1399,11 @@ fn heading(title: PaneTitle, theme: &Theme) -> Line<'static> {
         Column::Unstaged => "Unstaged",
     };
     match title {
-        PaneTitle::Diff => Line::from("─[0]─Diff─"),
-        PaneTitle::Uncommitted => Line::from("─[0]─Uncommitted changes─"),
-        PaneTitle::One(column) => Line::from(format!("─[0]─{} changes─", label(column))),
+        PaneTitle::Diff => Line::from("─Diff─"),
+        PaneTitle::Uncommitted => Line::from("─Uncommitted changes─"),
+        PaneTitle::One(column) => Line::from(format!("─{} changes─", label(column))),
         PaneTitle::Both(shown) => {
-            let mut spans = vec![Span::raw("─[0]─")];
+            let mut spans = vec![Span::raw("─")];
             spans.extend(column_tabs(shown, theme));
             spans.push(Span::raw("─"));
             Line::from(spans)
@@ -1989,7 +1989,7 @@ mod tests {
             "{docker}"
         );
         let plain = border("notes.txt");
-        assert!(plain.contains("[0] notes.txt "), "{plain}");
+        assert!(plain.contains("─notes.txt "), "{plain}");
         assert!(plain.ends_with("──╮"), "plain text has no badge: {plain}");
     }
 
@@ -2024,7 +2024,7 @@ mod tests {
         }];
         let mut state = make_state(&resolved);
         let border = crate::cli::browse::test_screen::screen(&mut state).remove(0);
-        assert!(border.contains("[0] old.txt → new.txt "), "{border}");
+        assert!(border.contains("─old.txt → new.txt "), "{border}");
     }
 
     #[test]

@@ -54,7 +54,7 @@ use crate::sidebar::{Root, Sidebar, display_path};
 use super::comment_view::render_comment_editor;
 use super::comments::{CommentAnchor, CommentStore, reanchor, review_text};
 use super::mode::{AppCommand, BackgroundWork, DrawBudget, Mode, Viewport};
-use super::panel::{self, panel_title};
+use super::panel;
 use super::vcs::{PendingDiscard, Vcs};
 use deltoids::render_tui::pane_border_color;
 
@@ -1326,7 +1326,9 @@ impl Mode for FilesMode {
     ) {
         let (sidebar_focused, diff_focused) =
             (self.focus == Focus::Sidebar, self.focus == Focus::Diff);
-        panel::Panel::draw_side(self, frame, left, '1', sidebar_focused, theme);
+        let color = pane_border_color(sidebar_focused, theme);
+        let (title, _) = panel::tab_strip(color, std::slice::from_ref(&self.label), 0, theme);
+        panel::Panel::draw_side(self, frame, left, title, sidebar_focused, theme);
         self.draw_diff(frame, right, layout, theme, budget, diff_focused);
     }
 
@@ -1454,23 +1456,26 @@ impl Mode for FilesMode {
 }
 
 impl panel::Panel for FilesMode {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
     fn draw_side(
         &mut self,
         frame: &mut ratatui::Frame<'_>,
         area: Rect,
-        number: char,
+        title: ratatui::text::Line<'static>,
         focused: bool,
         theme: &Theme,
     ) {
         self.sidebar_rect = area;
         self.sidebar
             .reveal_selected(area.height.saturating_sub(2) as usize);
-        let color = pane_border_color(focused, theme);
         sidebar_pane::draw_sidebar(
             frame,
             area,
             &self.sidebar,
-            panel_title(color, number, &self.label, theme),
+            title,
             sidebar_pane::sidebar_footer(&self.sidebar, theme),
             focused,
             theme,
