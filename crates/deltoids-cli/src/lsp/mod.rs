@@ -354,9 +354,13 @@ impl Inner {
     /// Only a change to what a server watches calls for this; a server
     /// that goes away leaves patterns that reach no one.
     fn refilter(&mut self) {
-        self.files.watch(watched_files::filter(
-            self.servers.values().map(Server::watched),
-        ));
+        let sets = self
+            .servers
+            .values()
+            .map(Server::watched)
+            .flat_map(|watched| watched.sets())
+            .collect();
+        self.files.watch(sets);
     }
 
     fn found(&self, hit: Hit) -> Found {

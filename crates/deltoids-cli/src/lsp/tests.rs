@@ -656,20 +656,29 @@ fn files_changed_on_disk_reach_the_server_that_watches_them() {
 
 #[test]
 fn a_watcher_hears_only_the_kinds_of_change_it_asked_for() {
-    let (dir, lsp, record) = watched_workdir(
-        |root| json!([{ "globPattern": format!("{}/**/*.rs", root.display()), "kind": 4 }]),
-    );
+    let (dir, lsp, record) = watched_workdir(|root| {
+        json!([
+            { "globPattern": format!("{}/**/*.rs", root.display()), "kind": 4 },
+            { "globPattern": format!("{}/**/*.md", root.display()) }
+        ])
+    });
     let files = lsp.file_events();
-    let path = dir.path().join("gone.rs");
-    fs::write(&path, "").unwrap();
-    files.record(&event(EventKind::Create(CreateKind::File), &path));
+    let (code, notes) = (dir.path().join("gone.rs"), dir.path().join("notes.md"));
+    for path in [&code, &notes] {
+        fs::write(path, "").unwrap();
+        files.record(&event(EventKind::Create(CreateKind::File), path));
+    }
     lsp.poll();
-    fs::remove_file(&path).unwrap();
-    files.record(&event(EventKind::Remove(RemoveKind::File), &path));
+    fs::remove_file(&code).unwrap();
+    files.record(&event(EventKind::Remove(RemoveKind::File), &code));
     lsp.poll();
 
-    assert!(eventually(|| !heard(&record).is_empty()));
-    assert_eq!(heard(&record), [(file_uri(&path), 3)]);
+    assert!(eventually(|| heard(&record).len() >= 2));
+    assert_eq!(
+        heard(&record),
+        [(file_uri(&notes), 1), (file_uri(&code), 3)],
+        "the .rs watcher hears deletions only; the .md one hears all"
+    );
 }
 
 #[test]

@@ -8,7 +8,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use globset::{Glob, GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use lsp_types::{
     DidChangeWatchedFilesRegistrationOptions, FileSystemWatcher, GlobPattern, RegistrationParams,
     UnregistrationParams, WatchKind,
@@ -29,11 +29,12 @@ pub(crate) struct FileEvents(Arc<Mutex<Pending>>);
 
 #[derive(Default)]
 struct Pending {
-    /// Every server's patterns; other paths are dropped on arrival, so
+    /// Each watching server's patterns, shared with its
+    /// [`Registrations`]; other paths are dropped on arrival, so
     /// `changes` never outgrows the files the servers watch. It may
     /// still hold the patterns of a server that stopped: what they match
     /// reaches no server and is gone at the next pump.
-    filter: GlobSet,
+    filter: Vec<Arc<GlobSet>>,
     /// Each changed path, and whether the watcher saw it created.
     changes: HashMap<PathBuf, bool>,
     lost: bool,
@@ -59,7 +60,7 @@ impl FileEvents {
         };
         let mut pending = self.lock();
         for path in &event.paths {
-            if pending.filter.is_match(path) {
+            if pending.filter.iter().any(|set| set.is_match(path)) {
                 *pending.changes.entry(path.clone()).or_default() |= created;
             }
         }
@@ -75,9 +76,9 @@ impl FileEvents {
         std::mem::take(&mut self.lock().lost)
     }
 
-    /// Keep the paths `filter` matches from now on.
-    pub(super) fn watch(&self, filter: GlobSet) {
-        self.lock().filter = filter;
+    /// Keep the paths one of `sets` matches from now on.
+    pub(super) fn watch(&self, sets: Vec<Arc<GlobSet>>) {
+        self.lock().filter = sets;
     }
 
     /// The changes since the last call, typed by what is on disk now.
@@ -143,13 +144,21 @@ impl ChangeKind {
     }
 }
 
-/// The patterns one server watches, by registration id.
+/// The patterns one server watches, by registration id, compiled once:
+/// a large server registers hundreds of patterns, and each compiled copy
+/// costs megabytes. Patterns are grouped by the kinds of change they
+/// hear, so a match never needs to know which pattern matched; servers
+/// usually hear every kind, which makes one set.
 #[derive(Default)]
-pub(super) struct Registrations(Vec<(String, Vec<Watcher>)>);
+pub(super) struct Registrations {
+    by_id: Vec<(String, Vec<Pattern>)>,
+    /// Every valid pattern, one set per kinds of change; shared with
+    /// [`FileEvents`] as its filter.
+    sets: Vec<(WatchKind, Arc<GlobSet>)>,
+}
 
-struct Watcher {
-    glob: Glob,
-    matcher: GlobMatcher,
+struct Pattern {
+    glob: String,
     kind: WatchKind,
 }
 
@@ -172,11 +181,14 @@ impl Registrations {
                     serde_json::from_value::<DidChangeWatchedFilesRegistrationOptions>(options).ok()
                 })
                 .map_or_else(Vec::new, |options| {
-                    options.watchers.iter().filter_map(Watcher::new).collect()
+                    options.watchers.iter().filter_map(Pattern::new).collect()
                 });
-            self.0.retain(|(id, _)| *id != registration.id);
-            self.0.push((registration.id, watchers));
+            self.by_id.retain(|(id, _)| *id != registration.id);
+            self.by_id.push((registration.id, watchers));
             changed = true;
+        }
+        if changed {
+            self.compile();
         }
         changed
     }
@@ -187,25 +199,34 @@ impl Registrations {
         let Ok(params) = serde_json::from_value::<UnregistrationParams>(params.clone()) else {
             return false;
         };
-        let before = self.0.len();
+        let before = self.by_id.len();
         for gone in params.unregisterations {
             if gone.method == METHOD {
-                self.0.retain(|(id, _)| *id != gone.id);
+                self.by_id.retain(|(id, _)| *id != gone.id);
             }
         }
-        self.0.len() != before
+        let changed = self.by_id.len() != before;
+        if changed {
+            self.compile();
+        }
+        changed
     }
 
     /// Forget every registration. Returns whether there were any.
     pub(super) fn clear(&mut self) -> bool {
-        let had = !self.0.is_empty();
-        self.0.clear();
+        let had = !self.by_id.is_empty();
+        *self = Self::default();
         had
     }
 
     /// Whether the server watches any file.
     pub(super) fn any(&self) -> bool {
-        self.watchers().next().is_some()
+        !self.sets.is_empty()
+    }
+
+    /// The compiled patterns, for [`FileEvents::watch`].
+    pub(super) fn sets(&self) -> impl Iterator<Item = Arc<GlobSet>> + '_ {
+        self.sets.iter().map(|(_, set)| Arc::clone(set))
     }
 
     /// The `didChangeWatchedFiles` params for the changes this server
@@ -213,7 +234,7 @@ impl Registrations {
     pub(super) fn notification(&self, changes: &[Change]) -> Option<Value> {
         let changes: Vec<Value> = changes
             .iter()
-            .filter(|change| self.watchers().any(|watcher| watcher.hears(change)))
+            .filter(|change| self.hears(change))
             .filter_map(|change| {
                 Some(json!({ "uri": position::uri(&change.path)?, "type": change.kind.code() }))
             })
@@ -221,49 +242,62 @@ impl Registrations {
         (!changes.is_empty()).then(|| json!({ "changes": changes }))
     }
 
-    fn watchers(&self) -> impl Iterator<Item = &Watcher> {
-        self.0.iter().flat_map(|(_, watchers)| watchers)
-    }
-}
-
-impl Watcher {
-    /// A watcher for an absolute glob string. Relative patterns are not
-    /// advertised, so a server that sends one anyway is not heard.
-    fn new(watcher: &FileSystemWatcher) -> Option<Self> {
-        let GlobPattern::String(pattern) = &watcher.glob_pattern else {
-            return None;
-        };
-        let glob = GlobBuilder::new(pattern)
-            .literal_separator(true)
-            .build()
-            .ok()?;
-        Some(Self {
-            matcher: glob.compile_matcher(),
-            glob,
-            kind: watcher.kind.unwrap_or(WatchKind::all()),
-        })
-    }
-
     fn hears(&self, change: &Change) -> bool {
-        self.kind.contains(change.kind.watch_kind()) && self.matcher.is_match(&change.path)
+        let wanted = change.kind.watch_kind();
+        self.sets
+            .iter()
+            .any(|(kind, set)| kind.contains(wanted) && set.is_match(&change.path))
     }
-}
 
-/// One filter for every server's patterns. When the patterns do not
-/// fit one set, every path is kept and each server's own patterns sort
-/// them out.
-pub(super) fn filter<'a>(all: impl IntoIterator<Item = &'a Registrations>) -> GlobSet {
-    let mut builder = GlobSetBuilder::new();
-    for registrations in all {
-        for watcher in registrations.watchers() {
-            builder.add(watcher.glob.clone());
+    /// Compile every registered pattern, one set per kinds of change.
+    /// Invalid patterns match nothing. Patterns too many for one set
+    /// match every path, which the server can ignore.
+    fn compile(&mut self) {
+        let mut groups: Vec<(WatchKind, GlobSetBuilder)> = Vec::new();
+        for pattern in self.by_id.iter().flat_map(|(_, patterns)| patterns) {
+            let Ok(glob) = GlobBuilder::new(&pattern.glob)
+                .literal_separator(true)
+                .build()
+            else {
+                continue;
+            };
+            let at = match groups.iter().position(|(kind, _)| *kind == pattern.kind) {
+                Some(at) => at,
+                None => {
+                    groups.push((pattern.kind, GlobSetBuilder::new()));
+                    groups.len() - 1
+                }
+            };
+            groups[at].1.add(glob);
         }
+        self.sets = groups
+            .into_iter()
+            .map(|(kind, builder)| {
+                (
+                    kind,
+                    Arc::new(builder.build().unwrap_or_else(|_| everything())),
+                )
+            })
+            .collect();
     }
-    builder.build().unwrap_or_else(|_| everything())
 }
 
 fn everything() -> GlobSet {
     let mut builder = GlobSetBuilder::new();
-    builder.add(Glob::new("**").expect("a valid glob"));
+    builder.add(GlobBuilder::new("**").build().expect("a valid glob"));
     builder.build().expect("one glob fits")
+}
+
+impl Pattern {
+    /// A pattern for an absolute glob string. Relative patterns are not
+    /// advertised, so a server that sends one anyway is not heard.
+    fn new(watcher: &FileSystemWatcher) -> Option<Self> {
+        let GlobPattern::String(glob) = &watcher.glob_pattern else {
+            return None;
+        };
+        Some(Self {
+            glob: glob.clone(),
+            kind: watcher.kind.unwrap_or(WatchKind::all()),
+        })
+    }
 }
