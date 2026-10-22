@@ -275,6 +275,8 @@ impl Workspace {
 
 impl Mode for Workspace {
     fn background(&mut self, active: bool) -> BackgroundWork {
+        // Unfocused or behind a review, edits still reach the servers.
+        self.files.poll_servers();
         let mut work = BackgroundWork::default();
         for side in Side::ALL {
             if let Some(panel) = self.panel(side) {

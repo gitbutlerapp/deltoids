@@ -606,6 +606,7 @@ dependencies = [
  "crossterm",
  "deltoids",
  "git2",
+ "globset",
  "jiff",
  "libc",
  "lsp-server",

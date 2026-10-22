@@ -222,10 +222,13 @@ impl FilesMode {
         let Some(vcs) = Vcs::discover_at(path) else {
             return Self::empty(theme, initial_diff_width);
         };
+        let servers = vcs
+            .repo()
+            .workdir()
+            .map(|root| (crate::lsp::Lsp::discover(root), root.to_path_buf()));
         // Watch before the snapshot so edits during the build stay pending.
-        let watcher = crate::cli::browse::watch::spawn_workdir_watcher(vcs.repo())
-            .ok()
-            .flatten();
+        let files = servers.as_ref().map(|(lsp, _)| lsp.file_events());
+        let watcher = spawn_workdir_watcher(vcs.repo(), files).ok().flatten();
         let mut mode = match Self::try_model(&vcs) {
             Ok((input, model)) => Self::new(model, input, Some(vcs), theme, initial_diff_width),
             // A repo-backed build lost a race (a size-check or content
@@ -235,11 +238,7 @@ impl FilesMode {
             Err(_) => Self::loading(vcs, theme, initial_diff_width),
         };
         mode._watcher = watcher;
-        if let Some(root) = mode.vcs.as_ref().and_then(|vcs| vcs.repo().workdir()) {
-            let root = root.to_path_buf();
-            mode.nav =
-                navigate::Navigation::new(Some(crate::lsp::Lsp::discover(&root)), Some(root));
-        }
+        mode.attach_servers(servers);
         mode.review = review::Review::from_env();
         mode.start_review();
         mode
@@ -317,6 +316,12 @@ impl FilesMode {
     /// views of this repository to share.
     pub(super) fn servers(&self) -> Option<(crate::lsp::Lsp, PathBuf)> {
         self.nav.servers()
+    }
+
+    /// Let the language servers handle what they were sent, so they keep
+    /// up with edits while nothing else asks them anything.
+    pub(super) fn poll_servers(&self) {
+        self.nav.poll();
     }
 
     /// Navigate with `servers`, shared with another view of the same
@@ -1363,9 +1368,13 @@ impl Mode for FilesMode {
             .as_ref()
             .is_some_and(ChangeWatcher::is_healthy)
         {
-            self._watcher = spawn_workdir_watcher(repo)?;
+            let files = self.nav.file_events();
+            self._watcher = spawn_workdir_watcher(repo, files.clone())?;
             if let Some(watcher) = &self._watcher {
                 watcher.receiver().request_rescan();
+            }
+            if let Some(files) = files {
+                files.lost();
             }
         }
         Ok(self._watcher.as_ref().map(ChangeWatcher::receiver))
@@ -2524,6 +2533,32 @@ mod tests {
         let state = make_state(&resolved);
         // Without a repo there is no on-disk path.
         assert_eq!(Mode::selected_path(&state), None);
+    }
+
+    #[test]
+    fn a_new_watcher_restarts_the_language_servers_that_watch_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo(dir.path());
+        let mut state = FilesMode::discover_at(dir.path(), &Theme::default(), 80);
+        let (lsp, record) = crate::lsp::fake::lsp(
+            dir.path(),
+            serde_json::json!({}),
+            crate::lsp::fake::watching(serde_json::json!([{ "globPattern": "**/*.rs" }])),
+        );
+        state.attach_servers(Some((lsp.clone(), dir.path().to_path_buf())));
+        lsp.warm(deltoids::Language::Rust);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !record.replied("register") {
+            assert!(std::time::Instant::now() < deadline, "never registered");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            lsp.poll();
+        }
+
+        // No healthy watcher: what changed until a new one runs is unknown.
+        state._watcher = None;
+        Mode::watch(&mut state).unwrap();
+        lsp.poll();
+        assert_eq!(record.launches(), 2);
     }
 
     #[test]

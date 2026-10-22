@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use super::config::{ServerSettings, ServerSpec};
 use super::position::{self, Encoding};
 use super::transport::Link;
+use super::watched_files::{self, Change, Registrations};
 use super::{Phase, Query};
 
 /// How long quitting waits for a server to shut down before killing it.
@@ -93,6 +94,10 @@ pub(super) struct Server {
     waiting: HashMap<RequestId, Waiting>,
     work: Vec<Work>,
     documents: HashMap<String, Document>,
+    /// The files the server asked to hear about.
+    watched: Registrations,
+    /// `watched` changed since [`Server::take_watched_changed`].
+    watched_changed: bool,
     stopped: bool,
 }
 
@@ -119,6 +124,8 @@ impl Server {
             waiting: HashMap::new(),
             work: Vec::new(),
             documents: HashMap::new(),
+            watched: Registrations::default(),
+            watched_changed: false,
             stopped: false,
         };
         let id = server.id();
@@ -131,7 +138,14 @@ impl Server {
             "capabilities": {
                 "general": { "positionEncodings": ["utf-8", "utf-16"] },
                 "window": { "workDoneProgress": true },
-                "workspace": { "workspaceFolders": true, "configuration": true },
+                "workspace": {
+                    "workspaceFolders": true,
+                    "configuration": true,
+                    "didChangeWatchedFiles": {
+                        "dynamicRegistration": true,
+                        "relativePatternSupport": false
+                    }
+                },
                 "textDocument": {
                     "synchronization": { "dynamicRegistration": false },
                     "definition": { "linkSupport": true },
@@ -154,6 +168,42 @@ impl Server {
 
     pub(super) fn stopped(&self) -> bool {
         self.stopped
+    }
+
+    /// The files the server asked to hear about.
+    pub(super) fn watched(&self) -> &Registrations {
+        &self.watched
+    }
+
+    /// Whether the files the server watches changed since the last call.
+    pub(super) fn take_watched_changed(&mut self) -> bool {
+        std::mem::take(&mut self.watched_changed)
+    }
+
+    /// Tell the server about the `changes` it watches.
+    pub(super) fn files_changed(&mut self, changes: &[Change]) {
+        if self.stopped {
+            return;
+        }
+        if let Some(params) = self.watched.notification(changes) {
+            self.send(Outgoing::Message(notification(
+                watched_files::METHOD,
+                params,
+            )));
+        }
+    }
+
+    /// Give up on every query in flight, answering each with `reason`.
+    pub(super) fn abandon(&mut self, reason: &str) -> Vec<(u64, Answer)> {
+        let mut answers = Vec::new();
+        self.fail_with(reason, &mut answers);
+        answers
+    }
+
+    /// From now on the server is stopped and watches nothing.
+    fn stop(&mut self) {
+        self.stopped = true;
+        self.watched_changed |= self.watched.clear();
     }
 
     /// Open `uri` with `text`, or send the new text when it changed.
@@ -241,7 +291,7 @@ impl Server {
                 Ok(message) => self.receive(message, &mut answers),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    self.stopped = true;
+                    self.stop();
                     break;
                 }
             }
@@ -260,12 +310,16 @@ impl Server {
             Some(reason) => format!("{} stopped: {reason}", self.name),
             None => format!("{} stopped; it restarts on the next request", self.name),
         };
+        self.fail_with(&message, answers);
+    }
+
+    fn fail_with(&mut self, message: &str, answers: &mut Vec<(u64, Answer)>) {
         for (_, waiting) in self.waiting.drain() {
-            answers.push((waiting.ticket, Err(message.clone())));
+            answers.push((waiting.ticket, Err(message.to_string())));
         }
         for outgoing in self.queue.drain(..) {
             if let Outgoing::Ask(ask) = outgoing {
-                answers.push((ask.ticket, Err(message.clone())));
+                answers.push((ask.ticket, Err(message.to_string())));
             }
         }
     }
@@ -298,7 +352,7 @@ impl Server {
     fn initialized(&mut self, response: Response) {
         self.initialize = None;
         let Ok(result) = response.response_result else {
-            self.stopped = true;
+            self.stop();
             return;
         };
         let capabilities = &result["capabilities"];
@@ -358,10 +412,15 @@ impl Server {
         let result = match request.method.as_str() {
             "workspace/configuration" => Some(self.configuration(&request.params)),
             "workspace/workspaceFolders" => Some(self.folders.clone()),
-            "client/registerCapability"
-            | "client/unregisterCapability"
-            | "window/workDoneProgress/create"
-            | "window/showMessageRequest" => Some(Value::Null),
+            "client/registerCapability" => {
+                self.watched_changed |= self.watched.register(&request.params);
+                Some(Value::Null)
+            }
+            "client/unregisterCapability" => {
+                self.watched_changed |= self.watched.unregister(&request.params);
+                Some(Value::Null)
+            }
+            "window/workDoneProgress/create" | "window/showMessageRequest" => Some(Value::Null),
             _ => None,
         };
         let response = match result {
@@ -428,7 +487,7 @@ impl Server {
 
     fn write(&mut self, message: Message) {
         if self.link.connection.sender.send(message).is_err() {
-            self.stopped = true;
+            self.stop();
         }
     }
 

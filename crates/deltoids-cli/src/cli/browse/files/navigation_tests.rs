@@ -633,13 +633,21 @@ fn the_border_shows_indexing_progress_and_the_footer_the_lookup() {
     }));
 
     Mode::handle_key(&mut state, KeyCode::Esc, PANE_HEIGHT);
+    let mut work = Mode::background(&mut state, true);
     assert!(
-        eventually(|| border(&mut state).contains("Rust ●")),
-        "indexing ended: ready"
+        eventually(|| {
+            work = Mode::background(&mut state, true);
+            !work.pending
+        }),
+        "an idle server lets the TUI rest"
     );
     assert!(
-        eventually(|| !Mode::background(&mut state, true).pending),
-        "an idle server lets the TUI rest"
+        work.changed,
+        "the tick that ends the work draws the spinner away"
+    );
+    assert!(
+        border(&mut state).contains("Rust ●"),
+        "indexing ended: ready"
     );
 }
 

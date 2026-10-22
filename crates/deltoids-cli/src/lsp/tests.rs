@@ -1,12 +1,16 @@
 //! The `Lsp` interface against scripted fake servers.
 
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use deltoids::Language;
 use lsp_server::{Message, Notification, Request, RequestId};
+use notify::EventKind;
+use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind};
 use serde_json::{Value, json};
 
 use super::fake::{self, Reply, answering};
@@ -560,6 +564,282 @@ fn dropping_the_last_handle_shuts_the_servers_down() {
         .ends_with(&["shutdown".to_string(), "exit".to_string()])));
 }
 
+fn unregister(request: &str, id: &str) -> Message {
+    Message::Request(Request::new(
+        RequestId::from(request.to_string()),
+        "client/unregisterCapability".to_string(),
+        json!({ "unregisterations": [{ "id": id, "method": "workspace/didChangeWatchedFiles" }] }),
+    ))
+}
+
+/// A watcher for `pattern` under `root`, written as rust-analyzer
+/// writes them: an absolute glob.
+fn glob(root: &Path, pattern: &str) -> Value {
+    json!({ "globPattern": format!("{}/{pattern}", root.display()) })
+}
+
+/// Every change the servers were told about: file URI and change type.
+fn heard(record: &fake::Record) -> Vec<(String, u64)> {
+    record
+        .params("workspace/didChangeWatchedFiles")
+        .iter()
+        .flat_map(|params| params["changes"].as_array().cloned().unwrap_or_default())
+        .map(|change| {
+            (
+                change["uri"].as_str().unwrap().to_string(),
+                change["type"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn file_uri(path: &Path) -> String {
+    url::Url::from_file_path(path).unwrap().to_string()
+}
+
+fn event(kind: EventKind, path: &Path) -> notify::Event {
+    notify::Event::new(kind).add_path(path.to_path_buf())
+}
+
+/// A workdir whose Rust server registered `watchers` once initialized.
+fn watched_workdir(watchers: impl Fn(&Path) -> Value) -> (tempfile::TempDir, Lsp, fake::Record) {
+    let dir = tempfile::tempdir().unwrap();
+    let (lsp, record) = fake::lsp(dir.path(), utf8(), fake::watching(watchers(dir.path())));
+    lsp.warm(Language::Rust);
+    assert!(eventually(|| {
+        lsp.poll();
+        record.replied("register")
+    }));
+    (dir, lsp, record)
+}
+
+#[test]
+fn files_changed_on_disk_reach_the_server_that_watches_them() {
+    let (dir, lsp, record) = watched_workdir(|root| json!([glob(root, "**/*.rs")]));
+    let advertised = &record.params("initialize")[0]["capabilities"]["workspace"];
+    assert_eq!(
+        advertised["didChangeWatchedFiles"]["dynamicRegistration"],
+        json!(true)
+    );
+
+    let files = lsp.file_events();
+    let path = dir.path().join("src/new.rs");
+    let notes = dir.path().join("notes.txt");
+    let folder = dir.path().join("src/generated.rs");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(dir.path().join("src/read.rs"), "").unwrap();
+    files.record(&event(
+        EventKind::Access(AccessKind::Open(AccessMode::Read)),
+        &dir.path().join("src/read.rs"),
+    ));
+    fs::write(&path, "fn a() {}\n").unwrap();
+    fs::write(&notes, "").unwrap();
+    for created in [&path, &notes, &folder] {
+        files.record(&event(EventKind::Create(CreateKind::Any), created));
+    }
+    lsp.poll();
+    fs::write(&path, "fn b() {}\n").unwrap();
+    files.record(&event(EventKind::Modify(ModifyKind::Any), &path));
+    lsp.poll();
+    fs::remove_file(&path).unwrap();
+    files.record(&event(EventKind::Remove(RemoveKind::Any), &path));
+    lsp.poll();
+
+    assert!(eventually(|| heard(&record).len() >= 3));
+    let uri = file_uri(&path);
+    assert_eq!(
+        heard(&record),
+        [(uri.clone(), 1), (uri.clone(), 2), (uri, 3)],
+        "created, changed, deleted; never a read, the text file, or the folder"
+    );
+}
+
+#[test]
+fn a_watcher_hears_only_the_kinds_of_change_it_asked_for() {
+    let (dir, lsp, record) = watched_workdir(
+        |root| json!([{ "globPattern": format!("{}/**/*.rs", root.display()), "kind": 4 }]),
+    );
+    let files = lsp.file_events();
+    let path = dir.path().join("gone.rs");
+    fs::write(&path, "").unwrap();
+    files.record(&event(EventKind::Create(CreateKind::File), &path));
+    lsp.poll();
+    fs::remove_file(&path).unwrap();
+    files.record(&event(EventKind::Remove(RemoveKind::File), &path));
+    lsp.poll();
+
+    assert!(eventually(|| !heard(&record).is_empty()));
+    assert_eq!(heard(&record), [(file_uri(&path), 3)]);
+}
+
+#[test]
+fn a_registration_replaces_the_one_with_its_id_and_unregistering_ends_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let (release, gate) = crossbeam_channel::unbounded::<Vec<Message>>();
+    let rust = glob(&root, "**/*.rs");
+    let script: fake::Script = Arc::new(move |message| match message {
+        Message::Notification(n) if n.method == "initialized" => Reply::Then(
+            vec![fake::register_watchers(
+                "first",
+                "watch",
+                json!([rust.clone()]),
+            )],
+            None,
+        ),
+        Message::Request(r) if r.method == "textDocument/definition" => {
+            Reply::Then(gate.recv().unwrap(), Some(Value::Null))
+        }
+        _ => Reply::Default,
+    });
+    let (lsp, record) = fake::lsp(&root, utf8(), script);
+    let files = lsp.file_events();
+    // Whatever the server sends before it answers is handled once the
+    // answer is in.
+    let round_trip = |messages: Vec<Message>| {
+        release.send(messages).unwrap();
+        let ticket = lsp.ask(Query::Definition, total(MAIN)).unwrap();
+        let _ = wait(&lsp, &ticket);
+    };
+
+    round_trip(vec![fake::register_watchers(
+        "second",
+        "watch",
+        json!([glob(&root, "**/*.md")]),
+    )]);
+    let (code, notes) = (root.join("a.rs"), root.join("a.md"));
+    for path in [&code, &notes] {
+        fs::write(path, "").unwrap();
+        files.record(&event(EventKind::Create(CreateKind::File), path));
+    }
+    round_trip(vec![unregister("third", "watch")]);
+    files.record(&event(EventKind::Modify(ModifyKind::Any), &notes));
+    round_trip(Vec::new());
+
+    assert_eq!(heard(&record), [(file_uri(&notes), 1)]);
+}
+
+#[test]
+fn each_server_hears_only_about_the_files_it_watches() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let started = AtomicUsize::new(0);
+    let patterns = [glob(&root, "**/*.rs"), glob(&root, "**/*.go")];
+    let script: fake::Script = Arc::new(move |message| match message {
+        Message::Notification(n) if n.method == "initialized" => {
+            let nth = started.fetch_add(1, Ordering::SeqCst);
+            Reply::Then(
+                vec![fake::register_watchers(
+                    &format!("register-{nth}"),
+                    "watch",
+                    json!([patterns[nth].clone()]),
+                )],
+                None,
+            )
+        }
+        _ => Reply::Default,
+    });
+    let (lsp, record) = fake::lsp(&root, utf8(), script);
+    for (language, request) in [(Language::Rust, "register-0"), (Language::Go, "register-1")] {
+        lsp.warm(language);
+        assert!(eventually(|| {
+            lsp.poll();
+            record.replied(request)
+        }));
+    }
+    let files = lsp.file_events();
+    let (code, go) = (root.join("a.rs"), root.join("b.go"));
+    for path in [&code, &go] {
+        fs::write(path, "").unwrap();
+        files.record(&event(EventKind::Create(CreateKind::File), path));
+    }
+    lsp.poll();
+
+    let told = || record.params("workspace/didChangeWatchedFiles");
+    assert!(eventually(|| told().len() >= 2));
+    let mut told: Vec<Vec<String>> = told()
+        .iter()
+        .map(|params| {
+            params["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|change| change["uri"].as_str().unwrap().to_string())
+                .collect()
+        })
+        .collect();
+    told.sort();
+    assert_eq!(told, [vec![file_uri(&code)], vec![file_uri(&go)]]);
+}
+
+#[test]
+fn a_change_on_disk_reaches_the_server_before_the_lookup_that_follows() {
+    let (dir, lsp, record) = watched_workdir(|root| json!([glob(root, "**/*.rs")]));
+    let cart = dir.path().join("src/cart.rs");
+    fs::create_dir_all(cart.parent().unwrap()).unwrap();
+    fs::write(&cart, "pub fn total() {}\n").unwrap();
+    lsp.file_events()
+        .record(&event(EventKind::Modify(ModifyKind::Any), &cart));
+    let ticket = lsp.ask(Query::Definition, total(MAIN)).unwrap();
+    let _ = wait(&lsp, &ticket);
+
+    let methods = record.methods();
+    let told = methods
+        .iter()
+        .position(|m| m == "workspace/didChangeWatchedFiles");
+    let asked = methods.iter().position(|m| m == "textDocument/definition");
+    assert!(told.is_some() && told < asked, "{methods:?}");
+}
+
+#[test]
+fn missed_changes_restart_only_the_servers_that_watch_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust = glob(dir.path(), "**/*.rs");
+    let started = AtomicUsize::new(0);
+    let script: fake::Script = Arc::new(move |message| match message {
+        Message::Notification(n)
+            if n.method == "initialized" && started.fetch_add(1, Ordering::SeqCst) == 0 =>
+        {
+            Reply::Then(
+                vec![fake::register_watchers(
+                    "register",
+                    "watch",
+                    json!([rust.clone()]),
+                )],
+                None,
+            )
+        }
+        Message::Request(r) if r.method == "textDocument/definition" => Reply::Silent,
+        _ => Reply::Default,
+    });
+    let (lsp, record) = fake::lsp(dir.path(), utf8(), script);
+    let files = lsp.file_events();
+    files.lost();
+    lsp.warm(Language::Rust);
+    assert!(eventually(|| {
+        lsp.poll();
+        record.replied("register")
+    }));
+    lsp.warm(Language::Go);
+    assert!(eventually(|| lsp.state(Language::Go) == State::Ready));
+    assert_eq!(record.launches(), 2, "nothing watched files before");
+    let ticket = lsp.ask(Query::Definition, total(MAIN)).unwrap();
+    assert!(eventually(|| {
+        lsp.poll();
+        !record.params("textDocument/definition").is_empty()
+    }));
+
+    files.lost();
+    lsp.poll();
+    assert_eq!(record.launches(), 3, "rust-analyzer again; gopls kept");
+    assert_eq!(
+        lsp.answer(&ticket),
+        Some(Err(
+            "rust-analyzer restarted to catch up with changes on disk; ask again".to_string()
+        ))
+    );
+}
+
 #[test]
 #[ignore = "needs rust-analyzer (on PATH, or its path in RUST_ANALYZER); run with --ignored"]
 fn rust_analyzer_finds_a_definition_in_another_file() {
@@ -578,22 +858,35 @@ fn rust_analyzer_finds_a_definition_in_another_file() {
     let program = std::env::var("RUST_ANALYZER").unwrap_or("rust-analyzer".to_string());
     let table = ServerTable::parse(&format!("[lsp.rust]\ncommand = [{program:?}]\n"));
     let lsp = Lsp::with_launcher(dir.path(), table, Box::new(super::transport::spawn));
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    let mut last = Err(String::new());
-    while std::time::Instant::now() < deadline {
-        let ticket = lsp.ask(Query::Definition, total(MAIN)).unwrap();
-        last = loop {
-            if let Some(answer) = lsp.answer(&ticket) {
-                break answer;
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
-        if last.is_ok() {
-            break;
+    let answer = |ticket: &Ticket| loop {
+        if let Some(answer) = lsp.answer(ticket) {
+            return answer;
         }
-        thread::sleep(Duration::from_millis(500));
-    }
-    assert_eq!(last, Ok(vec![found("src/cart.rs", 1, None)]));
+        thread::sleep(Duration::from_millis(20));
+    };
+    let ask_until = |expected: Vec<Found>| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let mut last = Err(String::new());
+        while std::time::Instant::now() < deadline {
+            let ticket = lsp.ask(Query::Definition, total(MAIN)).unwrap();
+            last = answer(&ticket);
+            if last.as_ref() == Ok(&expected) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+        assert_eq!(last, Ok(expected));
+    };
+    ask_until(vec![found("src/cart.rs", 1, None)]);
     assert!(dir.path().join("target/rust-analyzer").is_dir());
     assert!(!dir.path().join("target/debug").exists());
+
+    // deltoids never opened cart.rs: only the watched-files channel can
+    // tell the server it moved.
+    write("src/cart.rs", "\n\npub fn total() -> u32 {\n    42\n}\n");
+    lsp.file_events().record(&event(
+        EventKind::Modify(ModifyKind::Any),
+        &dir.path().join("src/cart.rs"),
+    ));
+    ask_until(vec![found("src/cart.rs", 3, None)]);
 }

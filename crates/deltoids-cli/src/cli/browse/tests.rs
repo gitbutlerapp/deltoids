@@ -614,7 +614,7 @@ fn idle_mode_does_not_reload_and_rescan_work_is_consumed_once() {
     assert_eq!(files.borrow().reloads, 0);
 
     let dir = tempfile::tempdir().unwrap();
-    let watcher = watch::ChangeWatcher::new(&[dir.path()]).unwrap();
+    let watcher = watch::ChangeWatcher::new(&[dir.path()], None).unwrap();
     let receiver = watcher.receiver();
     receiver.request_rescan();
     shell.receiver = Some(receiver);

@@ -8,6 +8,11 @@
 //! shows, the call-hierarchy-or-references choice, replies to the
 //! server's own requests, progress, crashes, and shutdown.
 //!
+//! deltoids watches files for its servers: the workdir watcher feeds
+//! [`Lsp::file_events`], and each server hears about the files it
+//! registered for. A server that would watch on its own can take
+//! minutes on a large tree.
+//!
 //! The seam is the transport ([`transport::Link`]): production spawns
 //! the configured command, and tests connect a scripted fake server over
 //! an in-memory connection.
@@ -25,6 +30,7 @@ mod config;
 mod position;
 mod server;
 mod transport;
+mod watched_files;
 
 #[cfg(test)]
 pub(crate) mod fake;
@@ -34,6 +40,7 @@ mod tests;
 use config::{ServerSpec, ServerTable};
 use server::{Ask, Hit, Server};
 use transport::Link;
+pub(crate) use watched_files::FileEvents;
 
 /// A symbol to ask about: one identifier on one line of a file whose
 /// text matches the file on disk.
@@ -114,6 +121,8 @@ struct Inner {
     failures: HashMap<ServerSpec, bool>,
     next_ticket: u64,
     answers: HashMap<u64, Result<Vec<Found>, String>>,
+    /// Changes to the files the servers watch, fed by the workdir watcher.
+    files: FileEvents,
 }
 
 impl Lsp {
@@ -132,6 +141,7 @@ impl Lsp {
         }
         Lsp(Rc::new(RefCell::new(Inner {
             root: root.to_path_buf(),
+            files: FileEvents::new(),
             roots,
             table,
             launch,
@@ -140,6 +150,20 @@ impl Lsp {
             next_ticket: 1,
             answers: HashMap::new(),
         })))
+    }
+
+    /// Where the workdir watcher reports changes on disk. Each server
+    /// hears about the files it registered for at the next pump; every
+    /// method here pumps first, and [`Lsp::poll`] pumps alone.
+    pub(crate) fn file_events(&self) -> FileEvents {
+        self.0.borrow().files.clone()
+    }
+
+    /// Handle what the servers sent and pass on changes on disk. Call it
+    /// regularly while nothing else here is called, so the servers keep
+    /// up with edits made elsewhere.
+    pub(crate) fn poll(&self) {
+        self.0.borrow_mut().pump();
     }
 
     /// Whether `language` has a configured server.
@@ -252,11 +276,25 @@ fn start_error(language: Language, spec: &ServerSpec, error: &io::Error) -> Stri
 }
 
 impl Inner {
-    /// Collect every server's answers.
+    /// Collect every server's answers and pass on changes on disk.
     fn pump(&mut self) {
         let mut answered = Vec::new();
+        if self.files.take_lost() {
+            self.restart_watching(&mut answered);
+        }
+        let mut watched_changed = false;
         for server in self.servers.values_mut() {
             answered.extend(server.pump());
+            watched_changed |= server.take_watched_changed();
+        }
+        if watched_changed {
+            self.refilter();
+        }
+        let changes = self.files.take();
+        if !changes.is_empty() {
+            for server in self.servers.values_mut() {
+                server.files_changed(&changes);
+            }
         }
         for (ticket, answer) in answered {
             let found = answer.map(|hits| hits.into_iter().map(|hit| self.found(hit)).collect());
@@ -274,19 +312,51 @@ impl Inner {
             .ok_or_else(|| format!("No language server for {}", language.name()))?;
         if self.servers.get(&spec).is_none_or(Server::stopped) {
             self.servers.remove(&spec);
-            let link = match (self.launch)(&spec, &self.root) {
-                Ok(link) => link,
-                Err(error) => {
-                    let missing = error.kind() == io::ErrorKind::NotFound;
-                    self.failures.insert(spec.clone(), missing);
-                    return Err(start_error(language, &spec, &error));
-                }
-            };
-            self.failures.remove(&spec);
-            let server = Server::start(&spec, link, &self.root);
-            self.servers.insert(spec.clone(), server);
+            self.start(&spec)
+                .map_err(|error| start_error(language, &spec, &error))?;
         }
         Ok(self.servers.get_mut(&spec).expect("inserted above"))
+    }
+
+    fn start(&mut self, spec: &ServerSpec) -> io::Result<()> {
+        let link = (self.launch)(spec, &self.root).inspect_err(|error| {
+            let missing = error.kind() == io::ErrorKind::NotFound;
+            self.failures.insert(spec.clone(), missing);
+        })?;
+        self.failures.remove(spec);
+        let server = Server::start(spec, link, &self.root);
+        self.servers.insert(spec.clone(), server);
+        Ok(())
+    }
+
+    /// Start every server that watches files again, so it reads the
+    /// disk afresh: changes went missing and no message says which.
+    /// Their queries in flight fail.
+    fn restart_watching(&mut self, answered: &mut Vec<(u64, server::Answer)>) {
+        let specs: Vec<ServerSpec> = self
+            .servers
+            .iter()
+            .filter(|(_, server)| server.watched().any())
+            .map(|(spec, _)| spec.clone())
+            .collect();
+        for spec in specs {
+            if let Some(mut server) = self.servers.remove(&spec) {
+                answered.extend(server.abandon(&format!(
+                    "{} restarted to catch up with changes on disk; ask again",
+                    spec.name()
+                )));
+            }
+            let _ = self.start(&spec);
+        }
+    }
+
+    /// Keep the changes some server watches, as the servers watch now.
+    /// Only a change to what a server watches calls for this; a server
+    /// that goes away leaves patterns that reach no one.
+    fn refilter(&mut self) {
+        self.files.watch(watched_files::filter(
+            self.servers.values().map(Server::watched),
+        ));
     }
 
     fn found(&self, hit: Hit) -> Found {

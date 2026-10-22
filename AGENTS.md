@@ -76,8 +76,10 @@ crates/
                              #     patches and Jev answers (re-record with
                              #     `record_jev_fixtures -- --ignored`)
     src/lsp/                 # Language servers: definition + callers for a symbol
-      mod.rs                 #   Lsp handle (warm/ask/answer/cancel/progress/sync)
+      mod.rs                 #   Lsp handle (warm/ask/answer/cancel/progress/sync/poll)
       server.rs              #   one server: handshake, queue, documents, requests, progress
+      watched_files.rs       #   files servers watch: their registrations, and the
+                             #     changes the workdir watcher feeds (Lsp::file_events)
       transport.rs           #   child-process adapter (stdio framing via lsp-server)
       config.rs              #   [lsp.<language>] tables over built-in defaults
                              #     (commands, rust-analyzer settings)
@@ -103,7 +105,8 @@ crates/
       diff_cursor.rs        #   the cursor that walks lines
       clipboard.rs          #   clipboard write (native helper + OSC 52)
       text.rs               #   display width + word wrapping
-      watch.rs              #   shared workdir watcher + reload filter
+      watch.rs              #   shared workdir watcher + reload filter;
+                            #     also feeds the language servers' changes
       tests.rs              #   shell tests (mock Mode)
       test_screen.rs        #   draw any Mode to text (test helper)
       panel.rs              #   Panel trait (side panel + main view) + titles

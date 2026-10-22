@@ -356,6 +356,44 @@ fn the_startup_placeholder_still_opens_on_files_once_built() {
 }
 
 #[test]
+fn edits_reach_the_language_servers_while_the_terminal_is_unfocused() {
+    use crate::lsp::fake;
+    use serde_json::json;
+
+    let dir = fixture();
+    let mut workspace = workspace(dir.path());
+    let (lsp, record) = fake::lsp(
+        dir.path(),
+        json!({}),
+        fake::watching(json!([{ "globPattern": "**/*.rs" }])),
+    );
+    workspace
+        .files
+        .attach_servers(Some((lsp.clone(), dir.path().to_path_buf())));
+    lsp.warm(deltoids::Language::Rust);
+    let unfocused_until = |workspace: &mut Workspace, done: &dyn Fn() -> bool| {
+        (0..300).any(|_| {
+            Mode::background(workspace, false);
+            done() || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }
+        })
+    };
+    assert!(unfocused_until(&mut workspace, &|| record.replied("register")));
+
+    let path = dir.path().join("greet.rs");
+    fs::write(&path, "fn greet() {}\n").unwrap();
+    lsp.file_events().record(
+        &notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(path),
+    );
+    assert!(unfocused_until(&mut workspace, &|| {
+        !record.params("workspace/didChangeWatchedFiles").is_empty()
+    }));
+}
+
+#[test]
 fn opens_on_the_files_panel_with_the_working_tree_diff() {
     let dir = fixture();
     let mut workspace = workspace(dir.path());

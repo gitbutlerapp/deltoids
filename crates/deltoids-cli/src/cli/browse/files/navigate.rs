@@ -37,7 +37,7 @@ use crate::cli::browse::diff_scrollbar;
 use crate::cli::browse::double_click::DoubleClick;
 use crate::cli::browse::syntax_badge::SyntaxBadge;
 use crate::cli::browse::text::display_width;
-use crate::lsp::{Found, Lsp, Query, State, Symbol, Ticket};
+use crate::lsp::{FileEvents, Found, Lsp, Query, State, Symbol, Ticket};
 use crate::sidebar::{IconMode, filter_icon};
 
 /// Spinner frames, one per 100 ms.
@@ -67,6 +67,9 @@ pub(super) struct Navigation {
     languages: Vec<Language>,
     started: Instant,
     frame: usize,
+    /// Whether the last tick was busy, so the tick that ends the work
+    /// draws the spinner away.
+    busy: bool,
     double_click: DoubleClick,
 }
 
@@ -174,6 +177,7 @@ impl Navigation {
             languages: Vec::new(),
             started: Instant::now(),
             frame: 0,
+            busy: false,
             double_click: DoubleClick::default(),
         }
     }
@@ -182,6 +186,17 @@ impl Navigation {
     /// another view of the same repository.
     pub(super) fn servers(&self) -> Option<(Lsp, PathBuf)> {
         Some((self.lsp.clone()?, self.root.clone()?))
+    }
+
+    /// Where the workdir watcher reports changes on disk to the servers.
+    pub(super) fn file_events(&self) -> Option<FileEvents> {
+        self.lsp.as_ref().map(Lsp::file_events)
+    }
+
+    pub(super) fn poll(&self) {
+        if let Some(lsp) = &self.lsp {
+            lsp.poll();
+        }
     }
 
     /// Forget the jump trail and the visited files it opened: the diff
@@ -579,6 +594,8 @@ pub(super) fn tick(state: &mut FilesMode) -> (bool, bool) {
         changed = true;
     }
     let busy = state.nav.pending.is_some() || state.nav.loading();
+    changed |= busy != state.nav.busy;
+    state.nav.busy = busy;
     if busy {
         let frame = state.nav.spinner_frame();
         changed |= frame != state.nav.frame;

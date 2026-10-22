@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use lsp_server::{Connection, Message, Request, Response};
+use lsp_server::{Connection, Message, Request, RequestId, Response};
 use serde_json::{Value, json};
 
 use super::Lsp;
@@ -72,6 +72,14 @@ impl Record {
     pub(crate) fn launches(&self) -> usize {
         self.launches.load(Ordering::SeqCst)
     }
+
+    /// Whether the client answered the server's request `id`.
+    pub(crate) fn replied(&self, id: &str) -> bool {
+        let id = RequestId::from(id.to_string());
+        self.messages()
+            .iter()
+            .any(|message| matches!(message, Message::Response(response) if response.id == id))
+    }
 }
 
 /// An [`Lsp`] for `root` whose servers (for every default language) are
@@ -99,6 +107,33 @@ pub(crate) fn lsp(root: &Path, capabilities: Value, script: Script) -> (Lsp, Rec
         Lsp::with_launcher(root, ServerTable::defaults(), launch),
         record,
     )
+}
+
+/// A request from the server to hear about changes to the files
+/// `watchers` match, registered as `id`. `request` is the request's
+/// own id, for [`Record::replied`].
+pub(crate) fn register_watchers(request: &str, id: &str, watchers: Value) -> Message {
+    Message::Request(Request::new(
+        RequestId::from(request.to_string()),
+        "client/registerCapability".to_string(),
+        json!({ "registrations": [{
+            "id": id,
+            "method": "workspace/didChangeWatchedFiles",
+            "registerOptions": { "watchers": watchers }
+        }] }),
+    ))
+}
+
+/// A script that registers `watchers` once initialized, in request
+/// `"register"`, and leaves the rest to [`Reply::Default`].
+pub(crate) fn watching(watchers: Value) -> Script {
+    Arc::new(move |message| match message {
+        Message::Notification(note) if note.method == "initialized" => Reply::Then(
+            vec![register_watchers("register", "watch", watchers.clone())],
+            None,
+        ),
+        _ => Reply::Default,
+    })
 }
 
 /// A script that leaves everything to [`Reply::Default`] except

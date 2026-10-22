@@ -9,6 +9,8 @@ use notify::{RecursiveMode, Watcher};
 
 use deltoids::git;
 
+use crate::lsp::FileEvents;
+
 const MAX_PENDING_PATHS: usize = 4096;
 
 /// One coalesced batch. A rescan replaces paths when the backend or this
@@ -42,21 +44,33 @@ impl ChangeReceiver {
     }
 }
 
-struct ChangeSender(Arc<PendingChanges>);
+struct ChangeSender {
+    pending: Arc<PendingChanges>,
+    /// The language servers' files: every event, ahead of the bounded
+    /// batch and its filter, so an overflow never hides an edit from
+    /// them. Each consumer decides what counts as a change.
+    files: Option<FileEvents>,
+}
 
 impl ChangeSender {
     fn send(&self, result: notify::Result<notify::Event>) {
-        let mut pending = self.0.batch.lock().unwrap_or_else(|err| err.into_inner());
         let event = match result {
             Ok(event) => event,
             Err(err) => {
-                self.0.failed.store(true, Ordering::Relaxed);
+                if let Some(files) = &self.files {
+                    files.lost();
+                }
+                self.pending.failed.store(true, Ordering::Relaxed);
+                let mut pending = self.lock();
                 pending.error.get_or_insert_with(|| err.to_string());
                 pending.rescan = true;
                 pending.paths.clear();
                 return;
             }
         };
+        if let Some(files) = &self.files {
+            files.record(&event);
+        }
         // Linux reports file opens, including reads performed by our own diff.
         // Only a write-close can represent new content among access events.
         if matches!(event.kind, notify::EventKind::Access(kind)
@@ -65,6 +79,7 @@ impl ChangeSender {
         {
             return;
         }
+        let mut pending = self.lock();
         if event.need_rescan() || event.paths.is_empty() {
             pending.rescan = true;
             pending.paths.clear();
@@ -81,6 +96,13 @@ impl ChangeSender {
             }
         }
     }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ChangeBatch> {
+        self.pending
+            .batch
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
 }
 
 impl Drop for ChangeSender {
@@ -91,9 +113,13 @@ impl Drop for ChangeSender {
     }
 }
 
-fn change_channel() -> (ChangeSender, ChangeReceiver) {
+fn change_channel(files: Option<FileEvents>) -> (ChangeSender, ChangeReceiver) {
     let pending = Arc::new(PendingChanges::default());
-    (ChangeSender(pending.clone()), ChangeReceiver(pending))
+    let sender = ChangeSender {
+        pending: pending.clone(),
+        files,
+    };
+    (sender, ChangeReceiver(pending))
 }
 
 fn normalize_event(
@@ -136,8 +162,10 @@ pub(super) struct ChangeWatcher {
 }
 
 impl ChangeWatcher {
-    pub fn new(roots: &[&Path]) -> Result<Self, String> {
-        let (sender, receiver) = change_channel();
+    /// Watch `roots`. `files` hears about every event, and that
+    /// changes went missing when the backend fails or this watcher stops.
+    pub fn new(roots: &[&Path], files: Option<FileEvents>) -> Result<Self, String> {
+        let (sender, receiver) = change_channel(files);
         let roots: Vec<_> = roots
             .iter()
             .map(|root| {
@@ -173,8 +201,12 @@ impl ChangeWatcher {
 }
 
 /// Watch the workdir and Git metadata, including shared refs outside a
-/// linked worktree. Bare repositories have no working-tree watcher.
-pub(super) fn spawn_workdir_watcher(repo: &git::Repo) -> Result<Option<ChangeWatcher>, String> {
+/// linked worktree, feeding `files` as [`ChangeWatcher::new`] does.
+/// Bare repositories have no working-tree watcher.
+pub(super) fn spawn_workdir_watcher(
+    repo: &git::Repo,
+    files: Option<FileEvents>,
+) -> Result<Option<ChangeWatcher>, String> {
     let Some(workdir) = repo.workdir() else {
         return Ok(None);
     };
@@ -185,7 +217,7 @@ pub(super) fn spawn_workdir_watcher(repo: &git::Repo) -> Result<Option<ChangeWat
             roots.push(root);
         }
     }
-    ChangeWatcher::new(&roots).map(Some)
+    ChangeWatcher::new(&roots, files).map(Some)
 }
 
 /// Git control files can change the diff or its staging status. Ignore
@@ -290,7 +322,7 @@ mod tests {
     }
     #[test]
     fn repeated_events_are_coalesced_and_later_events_survive_take() {
-        let (sender, receiver) = change_channel();
+        let (sender, receiver) = change_channel(None);
         for _ in 0..100_000 {
             sender.send(Ok(
                 notify::Event::new(notify::EventKind::Any).add_path("same".into())
@@ -310,7 +342,7 @@ mod tests {
 
     #[test]
     fn overflow_and_backend_rescan_retain_recovery_work() {
-        let (sender, receiver) = change_channel();
+        let (sender, receiver) = change_channel(None);
         for index in 0..=MAX_PENDING_PATHS {
             sender.send(Ok(
                 notify::Event::new(notify::EventKind::Any).add_path(index.to_string().into())
@@ -327,7 +359,7 @@ mod tests {
 
     #[test]
     fn callback_errors_and_disconnection_are_visible() {
-        let (sender, receiver) = change_channel();
+        let (sender, receiver) = change_channel(None);
         sender.send(Err(notify::Error::generic("backend failed")));
         assert!(receiver.take().error.unwrap().contains("backend failed"));
         drop(sender);
@@ -371,7 +403,7 @@ mod tests {
     fn real_watcher_reports_edits_and_ignores_clean_time() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
-        let watcher = ChangeWatcher::new(&[&root]).unwrap();
+        let watcher = ChangeWatcher::new(&[&root], None).unwrap();
         let receiver = watcher.receiver();
         assert!(receiver.take().paths.is_empty());
         let path = root.join("file.txt");
@@ -392,7 +424,7 @@ mod tests {
     }
     #[test]
     fn reads_do_not_schedule_refreshes_but_write_closes_do() {
-        let (sender, receiver) = change_channel();
+        let (sender, receiver) = change_channel(None);
         sender.send(Ok(notify::Event::new(notify::EventKind::Access(
             notify::event::AccessKind::Open(notify::event::AccessMode::Read),
         ))
@@ -428,7 +460,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let git_repo = init_repo(dir.path());
         let repo = git::Repo::discover_at(dir.path()).unwrap();
-        let watcher = spawn_workdir_watcher(&repo).unwrap().unwrap();
+        let watcher = spawn_workdir_watcher(&repo, None).unwrap().unwrap();
         git_repo
             .config()
             .unwrap()
@@ -449,19 +481,83 @@ mod tests {
         let linked = dir.path().join("linked");
         let _worktree = git_repo.worktree("linked", &linked, None).unwrap();
         let repo = git::Repo::discover_at(&linked).unwrap();
-        let watcher = spawn_workdir_watcher(&repo).unwrap().unwrap();
+        let watcher = spawn_workdir_watcher(&repo, None).unwrap().unwrap();
         let oid = git_repo.head().unwrap().target().unwrap();
         git_repo
             .reference("refs/heads/another", oid, true, "probe")
             .unwrap();
         wait_for_relevant_change(&repo, &watcher.receiver());
     }
+    /// A fake Rust language server for `root` that watches its `.rs`
+    /// files once initialized.
+    fn rust_server_watching(root: &Path) -> (crate::lsp::Lsp, crate::lsp::fake::Record) {
+        let watchers =
+            serde_json::json!([{ "globPattern": format!("{}/**/*.rs", root.display()) }]);
+        crate::lsp::fake::lsp(
+            root,
+            serde_json::json!({}),
+            crate::lsp::fake::watching(watchers),
+        )
+    }
+
+    /// Poll `lsp` until `done`, for up to three seconds.
+    fn poll_until(lsp: &crate::lsp::Lsp, what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            lsp.poll();
+            if done() {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn real_watcher_tells_the_language_servers_about_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (lsp, record) = rust_server_watching(root);
+        let watcher = ChangeWatcher::new(&[root], Some(lsp.file_events())).unwrap();
+        lsp.warm(deltoids::Language::Rust);
+        poll_until(&lsp, "the server registered", || record.replied("register"));
+
+        let path = root.join("lib.rs");
+        std::fs::write(&path, "fn a() {}\n").unwrap();
+        let uri = url::Url::from_file_path(&path).unwrap().to_string();
+        poll_until(&lsp, "the server heard about the edit", || {
+            record
+                .params("workspace/didChangeWatchedFiles")
+                .iter()
+                .any(|params| params["changes"][0]["uri"] == uri.as_str())
+        });
+        assert!(
+            watcher.receiver().take().paths.contains(&path),
+            "the diff still reloads"
+        );
+    }
+
+    #[test]
+    fn removed_watch_root_restarts_the_servers_that_watch_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("watched");
+        std::fs::create_dir(&root).unwrap();
+        let (lsp, record) = rust_server_watching(&root);
+        let _watcher = ChangeWatcher::new(&[&root], Some(lsp.file_events())).unwrap();
+        lsp.warm(deltoids::Language::Rust);
+        poll_until(&lsp, "the server registered", || record.replied("register"));
+        assert_eq!(record.launches(), 1);
+
+        std::fs::remove_dir(&root).unwrap();
+        poll_until(&lsp, "the server started again", || record.launches() == 2);
+    }
+
     #[test]
     fn removed_watch_root_requests_backend_recovery() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("watched");
         std::fs::create_dir(&root).unwrap();
-        let watcher = ChangeWatcher::new(&[&root]).unwrap();
+        let watcher = ChangeWatcher::new(&[&root], None).unwrap();
         let receiver = watcher.receiver();
         std::fs::remove_dir(&root).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
