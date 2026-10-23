@@ -35,7 +35,8 @@ fn main() {
 }
 ";
 
-/// `total` (line 4) is unchanged; `savings` (line 12) changes on line 13.
+/// `total` (line 4) is unchanged and `len` calls it on unchanged line 9;
+/// `savings` (line 12) changes on line 13.
 const CART_BEFORE: &str = "pub struct Cart;
 
 impl Cart {
@@ -44,7 +45,7 @@ impl Cart {
     }
 
     pub fn len(&self) -> u32 {
-        0
+        self.total()
     }
 
     pub fn savings(&self) -> u32 {
@@ -61,7 +62,7 @@ impl Cart {
     }
 
     pub fn len(&self) -> u32 {
-        0
+        self.total()
     }
 
     pub fn savings(&self) -> u32 {
@@ -133,7 +134,8 @@ fn location(uri: String, line: u32) -> Value {
 
 /// Definitions: `savings` asked from `main.rs` is on `cart.rs:12`,
 /// `total` asked from `cart.rs` on `cart.rs:4`. Callers of `total`:
-/// `savings` (in the diff) and `summary` (outside it).
+/// `savings` (on a changed line), `len` (on an unchanged line of the
+/// changed file), and `summary` (in a file the diff does not touch).
 fn shop_server(uri: &dyn Fn(&str) -> String) -> Script {
     let cart = uri("src/cart.rs");
     let report = uri("src/report.rs");
@@ -150,7 +152,11 @@ fn shop_server(uri: &dyn Fn(&str) -> String) -> Script {
             { "start": { "line": line, "character": 8 }, "end": { "line": line, "character": 13 } }
         ] })
     };
-    let calls = json!([call("savings", &cart, 12), call("summary", &report, 3)]);
+    let calls = json!([
+        call("len", &cart, 8),
+        call("savings", &cart, 12),
+        call("summary", &report, 3)
+    ]);
     Arc::new(move |message| match message {
         Message::Request(request) if request.method == "textDocument/definition" => {
             let asked = request.params["textDocument"]["uri"]
@@ -419,8 +425,13 @@ fn callers_list_the_diff_first_and_an_outside_caller_opens_as_a_visited_file() {
     assert!(screen.contains("Callers of total"));
     assert!(inside < screen.find("src/cart.rs:13").unwrap());
     assert!(screen.find("src/cart.rs:13").unwrap() < outside);
+    assert!(
+        outside < screen.find("src/cart.rs:9").unwrap(),
+        "an unchanged line of a changed file is outside the diff: {screen}"
+    );
     assert!(outside < screen.find("src/report.rs:4").unwrap());
 
+    press(&mut state, KeyCode::Char('j'));
     press(&mut state, KeyCode::Char('j'));
     press(&mut state, KeyCode::Enter);
     assert_eq!(
@@ -502,6 +513,7 @@ fn visited_files_stay_through_edits_and_go_when_the_diff_holds_other_files() {
     open(&mut state, "src/cart.rs");
     cursor_to(&mut state, "src/cart.rs", LineSide::New, 13);
     press(&mut state, KeyCode::Char('r'));
+    press(&mut state, KeyCode::Char('j'));
     press(&mut state, KeyCode::Char('j'));
     press(&mut state, KeyCode::Enter);
     assert!(sidebar_has_report(&mut state));

@@ -28,7 +28,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use deltoids::render_tui::{
     byte_at, line_cells, pane_block_with_title_line, pane_border_color, rgb_to_color,
 };
-use deltoids::{Diff, Language, LineMap, Symbols, Theme};
+use deltoids::{Diff, Language, LineKind, LineMap, Symbols, Theme};
 
 use super::model::{Column, FileBody, Model};
 use super::{FilesMode, Focus};
@@ -106,7 +106,9 @@ struct Entry {
 
 /// Where an answer lands.
 enum Place {
-    /// On a line a hunk draws.
+    /// On a line the diff adds or changes.
+    Changed(Landing),
+    /// On an unchanged line a hunk draws.
     Drawn(Landing),
     /// In a changed file, outside its hunks: the hunk opens to show it.
     Revealable(Landing),
@@ -118,7 +120,7 @@ enum Place {
 
 impl Place {
     fn in_diff(&self) -> bool {
-        matches!(self, Place::Drawn(_) | Place::Revealable(_))
+        matches!(self, Place::Changed(_))
     }
 }
 
@@ -686,10 +688,10 @@ fn place(state: &mut FilesMode, found: &Found) -> Place {
         line,
     };
     let anchor = anchor(&found.path, side, line);
-    if state.model.line(&anchor).is_some() {
-        Place::Drawn(landing)
-    } else {
-        Place::Revealable(landing)
+    match state.model.line(&anchor) {
+        Some((_, LineKind::Added)) => Place::Changed(landing),
+        Some(_) => Place::Drawn(landing),
+        None => Place::Revealable(landing),
     }
 }
 
@@ -710,7 +712,7 @@ fn column_of(model: &Model, index: usize) -> Column {
 /// The line of code an answer points at, trimmed, for the list.
 fn code(state: &mut FilesMode, found: &Found, place: &Place) -> String {
     let (text, line): (Option<Arc<str>>, usize) = match place {
-        Place::Drawn(landing) | Place::Revealable(landing) => (
+        Place::Changed(landing) | Place::Drawn(landing) | Place::Revealable(landing) => (
             body(&state.model, landing.index, landing.column)
                 .map(|(diff, _)| Arc::from(diff.updated())),
             landing.line,
@@ -729,13 +731,15 @@ fn code(state: &mut FilesMode, found: &Found, place: &Place) -> String {
 fn go(state: &mut FilesMode, entry: Entry) {
     let Entry { found, place, .. } = entry;
     let line = match &place {
-        Place::Drawn(landing) | Place::Revealable(landing) => landing.line,
+        Place::Changed(landing) | Place::Drawn(landing) | Place::Revealable(landing) => {
+            landing.line
+        }
         _ => found.line,
     };
     let at = format!("{}:{line}", found.path);
     match place {
         Place::Unreachable(message) => state.status = Some(message),
-        Place::Drawn(landing) => {
+        Place::Changed(landing) | Place::Drawn(landing) => {
             jump(state, landing, anchor(&found.path, landing.side, line));
             state.status = Some(format!("{at}  ·  Ctrl+o to go back"));
         }
