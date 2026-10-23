@@ -128,14 +128,15 @@ impl Repo {
     /// The patch commit `id` introduces against its first parent (every
     /// file added for a root commit), with full blob hashes so
     /// [`crate::content::retrieve`] resolves both sides from the object
-    /// database.
+    /// database. A GitButler conflicted commit, on either side, is
+    /// diffed by its auto-resolved tree, as GitButler shows it.
     pub fn commit_patch(&self, id: &str) -> Result<String, String> {
         let error = |e: git2::Error| format!("failed to diff commit {id}: {e}");
         let oid = Oid::from_str(id).map_err(error)?;
         let commit = self.0.find_commit(oid).map_err(error)?;
-        let tree = commit.tree().map_err(error)?;
+        let tree = shown_tree(&self.0, &commit).map_err(error)?;
         let parent = match commit.parent(0) {
-            Ok(parent) => Some(parent.tree().map_err(error)?),
+            Ok(parent) => Some(shown_tree(&self.0, &parent).map_err(error)?),
             Err(_) => None,
         };
         print_patch(&self.0, parent.as_ref(), &tree).map_err(error)
@@ -143,10 +144,17 @@ impl Repo {
 
     /// The patch from revision `base`'s tree to revision `tip`'s: the
     /// net change of every commit between them, in the form
-    /// [`Self::commit_patch`] gives.
+    /// [`Self::commit_patch`] gives, GitButler conflicted commits
+    /// included.
     pub fn tree_patch(&self, base: &str, tip: &str) -> Result<String, String> {
         let error = |e: git2::Error| format!("failed to diff {base}..{tip}: {e}");
-        let tree = |rev: &str| self.0.revparse_single(rev).and_then(|o| o.peel_to_tree());
+        let tree = |rev: &str| {
+            let object = self.0.revparse_single(rev)?;
+            match object.peel_to_commit() {
+                Ok(commit) => shown_tree(&self.0, &commit),
+                Err(_) => object.peel_to_tree(),
+            }
+        };
         let old = tree(base).map_err(error)?;
         let new = tree(tip).map_err(error)?;
         print_patch(&self.0, Some(&old), &new).map_err(error)
@@ -170,6 +178,44 @@ fn commit_of(commit: &git2::Commit<'_>) -> Commit {
         email: author.email().unwrap_or_default().to_string(),
         time: author.when().seconds(),
     }
+}
+
+/// The tree `commit` shows: its `.auto-resolution` subtree when
+/// GitButler wrote it as a conflicted commit, else its own tree.
+///
+/// GitButler's rule (`Commit::is_conflicted` in `but-core`): the commit
+/// carries conflict metadata, a `GitButler-Conflict` message trailer or a
+/// numeric `gitbutler-conflicted` header, and its tree holds synthetic
+/// entries next to the files. Those entries are whole copies of the
+/// repository, so diffing the raw tree would list every file several
+/// times over. Without an `.auto-resolution` entry the raw tree is shown.
+fn shown_tree<'r>(
+    repo: &'r Repository,
+    commit: &git2::Commit<'r>,
+) -> Result<git2::Tree<'r>, git2::Error> {
+    let tree = commit.tree()?;
+    if !has_conflict_metadata(commit) {
+        return Ok(tree);
+    }
+    let resolved = tree.get_name(".auto-resolution").map(|entry| entry.id());
+    match resolved {
+        Some(id) => repo.find_tree(id),
+        None => Ok(tree),
+    }
+}
+
+fn has_conflict_metadata(commit: &git2::Commit<'_>) -> bool {
+    let trailer = git2::message_trailers_bytes(commit.message_bytes()).is_ok_and(|trailers| {
+        trailers
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case(b"GitButler-Conflict"))
+    });
+    let header = commit
+        .header_field_bytes("gitbutler-conflicted")
+        .ok()
+        .and_then(|value| std::str::from_utf8(&value).ok()?.trim().parse::<u64>().ok())
+        .is_some();
+    trailer || header
 }
 
 fn print_patch(

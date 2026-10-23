@@ -353,3 +353,182 @@ fn commits_after_stop_at_the_base_even_past_a_merge() {
         "an unknown base hides nothing"
     );
 }
+
+/// A tree of `files`, each a path at the root and its text.
+fn tree_of(repo: &Repository, files: &[(&str, &str)]) -> Oid {
+    let mut builder = repo.treebuilder(None).unwrap();
+    for (path, text) in files {
+        let blob = repo.blob(text.as_bytes()).unwrap();
+        builder.insert(path, blob, 0o100644).unwrap();
+    }
+    builder.write().unwrap()
+}
+
+/// The tree GitButler writes for a conflicted commit: `top` at the root,
+/// `resolved` as `.auto-resolution`, one side, and the conflict list.
+fn conflicted_tree(repo: &Repository, top: &[(&str, &str)], resolved: &[(&str, &str)]) -> Oid {
+    let base = repo.find_tree(tree_of(repo, top)).unwrap();
+    let mut builder = repo.treebuilder(Some(&base)).unwrap();
+    let auto = tree_of(repo, resolved);
+    let side = tree_of(repo, &[("a.txt", "theirs\n")]);
+    let list = repo.blob(b"ourEntries = [\"a.txt\"]\n").unwrap();
+    builder.insert(".auto-resolution", auto, 0o040000).unwrap();
+    builder.insert(".conflict-side-0", side, 0o040000).unwrap();
+    builder.insert(".conflict-files", list, 0o100644).unwrap();
+    builder.write().unwrap()
+}
+
+/// Write a commit of `tree` on `parent`, with `header` (a `name value`
+/// line) after the committer when given, and return its id.
+fn commit_tree(
+    repo: &Repository,
+    tree: Oid,
+    parent: Option<Oid>,
+    message: &str,
+    header: Option<&str>,
+) -> String {
+    let sig = Signature::new("Ada Lovelace", "ada@example.com", &Time::new(100, 0)).unwrap();
+    let tree = repo.find_tree(tree).unwrap();
+    let parent = parent.map(|id| repo.find_commit(id).unwrap());
+    let parents: Vec<&git2::Commit> = parent.iter().collect();
+    let buffer = repo
+        .commit_create_buffer(&sig, &sig, message, &tree, &parents)
+        .unwrap();
+    let mut text = buffer.as_str().unwrap().to_string();
+    if let Some(header) = header {
+        let end = text.find("\n\n").unwrap();
+        text.insert_str(end, &format!("\n{header}"));
+    }
+    repo.odb()
+        .unwrap()
+        .write(git2::ObjectType::Commit, text.as_bytes())
+        .unwrap()
+        .to_string()
+}
+
+const CONFLICTED: &str = "[conflict] change\n\nGitButler-Conflict: This is a GitButler-managed conflicted commit.\n   It keeps more trees.\n";
+
+#[test]
+fn commit_patch_of_a_gitbutler_conflicted_commit_shows_its_auto_resolution() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = init_repo(dir.path());
+    let base = commit_tree(
+        &raw,
+        tree_of(&raw, &[("a.txt", "one\n")]),
+        None,
+        "base",
+        None,
+    );
+    let tree = conflicted_tree(&raw, &[("a.txt", "one\n")], &[("a.txt", "two\n")]);
+    let id = commit_tree(
+        &raw,
+        tree,
+        Some(Oid::from_str(&base).unwrap()),
+        CONFLICTED,
+        None,
+    );
+
+    let repo = Repo::discover_at(dir.path()).unwrap();
+    let patch = repo.commit_patch(&id).unwrap();
+
+    assert!(patch.contains("diff --git a/a.txt b/a.txt"), "{patch}");
+    assert!(patch.contains("-one\n+two\n"), "{patch}");
+    assert!(!patch.contains(".auto-resolution"), "{patch}");
+    assert!(!patch.contains(".conflict-"), "{patch}");
+}
+
+#[test]
+fn commit_patch_on_a_gitbutler_conflicted_parent_diffs_against_its_auto_resolution() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = init_repo(dir.path());
+    let tree = conflicted_tree(&raw, &[("a.txt", "one\n")], &[("a.txt", "two\n")]);
+    let parent = commit_tree(&raw, tree, None, CONFLICTED, None);
+    let files = [("a.txt", "two\n"), ("b.txt", "new\n")];
+    let child = tree_of(&raw, &files);
+    let id = commit_tree(
+        &raw,
+        child,
+        Some(Oid::from_str(&parent).unwrap()),
+        "child",
+        None,
+    );
+
+    let repo = Repo::discover_at(dir.path()).unwrap();
+    let patch = repo.commit_patch(&id).unwrap();
+
+    assert!(patch.contains("diff --git a/b.txt b/b.txt"), "{patch}");
+    assert!(!patch.contains("a.txt"), "{patch}");
+    assert!(!patch.contains(".auto-resolution"), "{patch}");
+    assert!(!patch.contains(".conflict-"), "{patch}");
+}
+
+#[test]
+fn tree_patch_to_a_gitbutler_conflicted_tip_shows_its_auto_resolution() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = init_repo(dir.path());
+    let base = commit_tree(
+        &raw,
+        tree_of(&raw, &[("a.txt", "one\n")]),
+        None,
+        "base",
+        None,
+    );
+    let tree = conflicted_tree(&raw, &[("a.txt", "one\n")], &[("a.txt", "two\n")]);
+    let tip = commit_tree(
+        &raw,
+        tree,
+        Some(Oid::from_str(&base).unwrap()),
+        CONFLICTED,
+        None,
+    );
+
+    let repo = Repo::discover_at(dir.path()).unwrap();
+    let patch = repo.tree_patch(&format!("{tip}^"), &tip).unwrap();
+
+    assert!(patch.contains("-one\n+two\n"), "{patch}");
+    assert!(!patch.contains(".conflict-"), "{patch}");
+}
+
+#[test]
+fn a_gitbutler_conflicted_header_marks_a_conflicted_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = init_repo(dir.path());
+    let base = commit_tree(
+        &raw,
+        tree_of(&raw, &[("a.txt", "one\n")]),
+        None,
+        "base",
+        None,
+    );
+    let tree = conflicted_tree(&raw, &[("a.txt", "one\n")], &[("a.txt", "two\n")]);
+    let parent = Some(Oid::from_str(&base).unwrap());
+    let id = commit_tree(&raw, tree, parent, "change", Some("gitbutler-conflicted 1"));
+
+    let repo = Repo::discover_at(dir.path()).unwrap();
+    let patch = repo.commit_patch(&id).unwrap();
+
+    assert!(patch.contains("-one\n+two\n"), "{patch}");
+    assert!(!patch.contains(".conflict-"), "{patch}");
+}
+
+#[test]
+fn a_conflict_subject_alone_shows_the_tree_as_committed() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = init_repo(dir.path());
+    let base = commit_tree(
+        &raw,
+        tree_of(&raw, &[("a.txt", "one\n")]),
+        None,
+        "base",
+        None,
+    );
+    let tree = conflicted_tree(&raw, &[("a.txt", "one\n")], &[("a.txt", "two\n")]);
+    let parent = Some(Oid::from_str(&base).unwrap());
+    let id = commit_tree(&raw, tree, parent, "[conflict] change", None);
+
+    let repo = Repo::discover_at(dir.path()).unwrap();
+    let patch = repo.commit_patch(&id).unwrap();
+
+    assert!(patch.contains("b/.auto-resolution/a.txt"), "{patch}");
+    assert!(!patch.contains("-one\n+two\n"), "{patch}");
+}
