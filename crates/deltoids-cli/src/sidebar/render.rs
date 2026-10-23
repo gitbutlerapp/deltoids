@@ -311,22 +311,9 @@ fn file_row_spans(
         Some((old, new)) => format!("{old} \u{2192} {new}"),
         None => name.to_string(),
     };
-    // Filename colour. With stage data, follow lazygit's `getFileLine`:
-    // green when fully staged, yellow when partially staged, default
-    // otherwise. Without stage data (no repo) fall back to
-    // greening a fully-added file, matching lazygit's staged-add
-    // treatment.
-    let name_style = match meta.stage {
-        Some(stage) => match stage_tint(stage.is_staged(), stage.is_unstaged(), theme) {
-            Some(color) => base.fg(color),
-            None => base,
-        },
-        None if meta.status == Some(FileStatus::Added) => base.fg(rgb_to_color(theme.status_added)),
-        None => base,
-    };
     let name_style = match meta.note {
         Some(note) if note.low => base.fg(rgb_to_color(theme.muted)),
-        _ => name_style,
+        _ => base,
     };
     spans.push(Span::styled(display_name, name_style));
 
@@ -420,10 +407,9 @@ fn stage_char_span(
     }
 }
 
-/// Lazygit's label-tint rule, shared by file rows and directory rows.
-/// Green when fully staged, yellow when partially staged, `None`
-/// (terminal default) otherwise. For a directory the inputs are the
-/// OR-fold over its subtree; for a file they're its own two columns.
+/// Lazygit's directory-label tint: green when fully staged, yellow when
+/// partially staged, `None` (terminal default) otherwise. The inputs are
+/// the OR-fold over the directory's subtree.
 fn stage_tint(has_staged: bool, has_unstaged: bool, theme: &Theme) -> Option<Color> {
     match (has_staged, has_unstaged) {
         (true, false) => Some(rgb_to_color(theme.status_added)),
@@ -754,11 +740,7 @@ mod tests {
         assert_eq!(sc, 'A');
         assert_eq!(sfg, Some(rgb_to_color(theme().status_added)));
         assert_eq!(wc, ' ');
-        // Fully staged: filename is green.
-        assert_eq!(
-            name_span(&spans, "added.rs").style.fg,
-            Some(rgb_to_color(theme().status_added))
-        );
+        assert_eq!(name_span(&spans, "added.rs").style.fg, None);
     }
 
     #[test]
@@ -775,7 +757,6 @@ mod tests {
         assert_eq!(sc, ' ');
         assert_eq!(wc, 'M');
         assert_eq!(wfg, Some(rgb_to_color(theme().status_deleted)));
-        // Not staged: default filename colour (no explicit fg).
         assert_eq!(name_span(&spans, "mod.rs").style.fg, None);
     }
 
@@ -793,11 +774,7 @@ mod tests {
         assert_eq!((sc, wc), ('M', 'M'));
         assert_eq!(sfg, Some(rgb_to_color(theme().status_added)));
         assert_eq!(wfg, Some(rgb_to_color(theme().status_deleted)));
-        // Partially staged: filename is yellow.
-        assert_eq!(
-            name_span(&spans, "both.rs").style.fg,
-            Some(rgb_to_color(theme().status_partial))
-        );
+        assert_eq!(name_span(&spans, "both.rs").style.fg, None);
     }
 
     #[test]
@@ -815,8 +792,6 @@ mod tests {
         assert_eq!((sc, wc), ('?', '?'));
         assert_eq!(sfg, Some(rgb_to_color(theme().status_deleted)));
         assert_eq!(wfg, Some(rgb_to_color(theme().status_deleted)));
-        // The staging model stays porcelain (staged column empty), so the
-        // name is not tinted as staged.
         assert_eq!(name_span(&spans, "new.rs").style.fg, None);
     }
 
@@ -830,7 +805,7 @@ mod tests {
         custom.status_deleted = (4, 5, 6);
         custom.status_partial = (7, 8, 9);
 
-        // Fully staged add: stage char + name tint use status_added.
+        // Fully staged add: the stage char uses status_added.
         let f = fd("added.rs");
         let files = vec![SidebarFile {
             file: &f,
@@ -845,10 +820,6 @@ mod tests {
         let spans = &sidebar.rows()[0].spans;
         let [(_, sfg), _] = stage_chars(spans);
         assert_eq!(sfg, Some(rgb_to_color(custom.status_added)));
-        assert_eq!(
-            name_span(spans, "added.rs").style.fg,
-            Some(rgb_to_color(custom.status_added))
-        );
         // +N uses status_added, -N uses status_deleted.
         let plus = spans
             .iter()
@@ -878,6 +849,8 @@ mod tests {
         // Second span (after indent) is the "A " badge, not a 1-char col.
         assert_eq!(spans[1].content.as_ref(), "A ");
         assert_eq!(spans[1].style.fg, Some(rgb_to_color(theme().status_added)));
+        // The name has the default colour.
+        assert_eq!(name_span(spans, "a.rs").style.fg, None);
     }
 
     #[test]
@@ -903,8 +876,8 @@ mod tests {
         let selected = &sidebar.rows()[sidebar.selected()];
         let other_idx = if sidebar.selected() == 0 { 1 } else { 0 };
         let other = &sidebar.rows()[other_idx];
-        // The name span is not otherwise bold (added-file name is a plain
-        // green span), so it isolates the selection modifier.
+        // The name span is not otherwise bold, so it isolates the
+        // selection modifier.
         assert!(
             name_span(&selected.spans, "a.rs")
                 .style
