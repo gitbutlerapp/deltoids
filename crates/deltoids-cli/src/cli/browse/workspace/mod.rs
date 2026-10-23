@@ -16,7 +16,8 @@
 //!
 //! Files has a tab only while the working tree has changes (or is still
 //! loading, or failed to build) or a review is open; otherwise Branches
-//! is the only tab and keeps focus. While a review is open it is the
+//! is the only tab and keeps focus. When changes appear on a clean tree,
+//! Files comes back as the current tab, focused. While a review is open it is the
 //! only tab: `Esc` closes it and returns to Branches, still on the
 //! reviewed row.
 //!
@@ -430,13 +431,19 @@ impl Mode for Workspace {
 
     /// Rebuild the working tree's diff and re-read the branches. Commits
     /// and branches move with the working tree (a commit empties the
-    /// index), so this always asks for a frame.
+    /// index), so this always asks for a frame. Changes on a clean tree
+    /// bring Files back and focus it.
     fn reload(&mut self, viewport: Viewport, theme: &Theme) -> Result<bool, String> {
+        let files_hidden = !self.shows(Side::Files);
         let changed = self.files.reload(viewport, theme)?;
         if let Some(branches) = &mut self.branches {
             branches.refresh();
         }
-        self.settle_focus();
+        if files_hidden && self.shows(Side::Files) {
+            self.focus(Side::Files, false);
+        } else {
+            self.settle_focus();
+        }
         Ok(changed || self.branches.is_some())
     }
 

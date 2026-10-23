@@ -316,17 +316,40 @@ fn committing_every_change_hides_files_and_focuses_branches() {
 }
 
 #[test]
-fn a_new_change_brings_files_back_without_moving_focus() {
+fn a_new_change_on_a_clean_tree_focuses_files() {
     let dir = clean_fixture();
     let mut workspace = workspace(dir.path());
 
     edit_unstaged(dir.path());
     reload(&mut workspace);
 
-    assert!(has_panel(&mut workspace, '1'));
-    assert_eq!(focused_panel(&mut workspace), Some('2'));
-    show(&mut workspace, '1');
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
     assert!(panel(&mut workspace, '1').contains("greet.rs"));
+}
+
+#[test]
+fn a_new_change_moves_focus_from_the_branches_main_view_to_files() {
+    let dir = clean_fixture();
+    let mut workspace = workspace(dir.path());
+    focus_main(&mut workspace);
+
+    edit_unstaged(dir.path());
+    reload(&mut workspace);
+
+    assert!(!right_focused(&mut workspace));
+    assert_eq!(focused_panel(&mut workspace), Some('1'));
+}
+
+#[test]
+fn further_changes_leave_focus_on_branches() {
+    let dir = fixture();
+    let mut workspace = workspace(dir.path());
+    show(&mut workspace, '2');
+
+    edit_unstaged(dir.path());
+    reload(&mut workspace);
+
+    assert_eq!(focused_panel(&mut workspace), Some('2'));
 }
 
 #[test]
