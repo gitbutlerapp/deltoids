@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI: rust-analyzer started for code navigation no longer makes `cargo build` and `cargo test` wait. It builds in its own `target/rust-analyzer` directory and skips its startup `cargo check`.
 - TUI: fix code navigation in repositories with many folders, where rust-analyzer stayed at 100% and found nothing. deltoids now tells language servers which files changed, including edits made while the terminal is in the background.
 - TUI: the language server mark in a file's header turns ready as soon as indexing ends, without waiting for a key press.
-- TUI: the callers of a method that implements a trait include the calls made through the trait, such as calls in generic code.
+- TUI: `r` lists where any symbol is used, including constants, enum variants, types, and fields. A function's callers include calls through a trait, such as calls in generic code, and leave out calls to other implementations.
 - TUI: fix commits and branch reviews that stayed on `Loading…` after a GitButler rebase left conflicted commits. A conflicted commit now shows its auto-resolved change, as GitButler does.
 
 ## [0.16.0] - 2026-10-21

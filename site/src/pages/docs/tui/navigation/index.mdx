@@ -20,7 +20,7 @@ The symbol under the cursor is underlined.
 | --- | --- |
 | `w` / `b` | Pick the next or previous symbol on the line |
 | `Enter` | Go to the definition of the symbol. On a definition, list its callers. |
-| `r` | List the callers of the function |
+| `r` | List where the symbol is used: the callers of a function, or the uses of a constant, type, or field |
 | `Ctrl+o` | Go back to where you were before the last jump |
 | `Esc` | Cancel a lookup, or close the list of callers |
 
@@ -28,11 +28,12 @@ The symbol under the cursor is underlined.
 | --- | --- |
 | Click a symbol | Pick it |
 | Double-click a symbol | Go to its definition |
-| Right-click a symbol | List its callers |
+| Right-click a symbol | List where it is used |
 
-The callers of a method that implements a trait include the calls made
-through the trait, such as calls in generic code. Calls that go to
-another implementation are left out.
+The list of callers holds every call of a function, including calls
+through a trait, such as calls in generic code, and uses outside a
+function. Calls that go to another implementation of the trait and
+`use` lines are left out.
 
 ## Server state
 

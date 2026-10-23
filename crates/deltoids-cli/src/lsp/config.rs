@@ -40,11 +40,16 @@ impl ServerSettings {
 
 /// rust-analyzer builds in its own target directory and skips the
 /// startup `cargo check`, so it never holds the build lock the user's
-/// `cargo build` and `cargo test` need.
+/// `cargo build` and `cargo test` need. References leave out imports:
+/// a `use` line is not a use a reader looks for.
 fn rust_analyzer_settings() -> ServerSettings {
     ServerSettings::new(
         "rust-analyzer",
-        json!({ "cargo": { "targetDir": true }, "checkOnSave": false }),
+        json!({
+            "cargo": { "targetDir": true },
+            "checkOnSave": false,
+            "references": { "excludeImports": true }
+        }),
     )
 }
 

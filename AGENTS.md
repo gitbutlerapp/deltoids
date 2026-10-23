@@ -78,6 +78,8 @@ crates/
     src/lsp/                 # Language servers: definition + callers for a symbol
       mod.rs                 #   Lsp handle (warm/ask/answer/cancel/progress/sync/poll)
       server.rs              #   one server: handshake, queue, documents, requests, progress
+      callers.rs             #   callers lookup: every use of any symbol (call
+                             #     hierarchy + references, calls through a trait)
       watched_files.rs       #   files servers watch: their registrations, and the
                              #     changes the workdir watcher feeds (Lsp::file_events)
       transport.rs           #   child-process adapter (stdio framing via lsp-server)

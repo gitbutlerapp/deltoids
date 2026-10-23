@@ -1,13 +1,13 @@
-//! Language servers: where a symbol is defined and who calls it.
+//! Language servers: where a symbol is defined and who uses it.
 //!
 //! [`Lsp`] is the whole interface. Ask a [`Query`] about a [`Symbol`],
 //! get a [`Ticket`], and read its [`Found`] locations once the server
 //! answers. Everything protocol-shaped stays inside: starting servers
 //! (lazily, one per distinct command), the handshake, position encodings,
 //! file URIs, keeping open documents in step with the text the caller
-//! shows, the call-hierarchy-or-references choice, widening the callers
-//! of a trait impl method to the calls that reach it through the trait,
-//! replies to the server's own requests, progress, crashes, and shutdown.
+//! shows, the callers lookup (call hierarchy and references together,
+//! calls through a trait included: [`callers`]), replies to the server's
+//! own requests, progress, crashes, and shutdown.
 //!
 //! deltoids watches files for its servers: the workdir watcher feeds
 //! [`Lsp::file_events`], and each server hears about the files it
@@ -27,6 +27,7 @@ use std::rc::Rc;
 
 use deltoids::Language;
 
+mod callers;
 mod config;
 mod position;
 mod server;
