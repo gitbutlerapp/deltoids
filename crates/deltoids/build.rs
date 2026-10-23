@@ -14,6 +14,12 @@ use syntect::highlighting::ThemeSet;
 
 fn main() {
     convert_theme("assets/themes/tokyonight.tmTheme", "tokyonight.themedump");
+    // bat's assets: with the `bat` feature, which only native builds can have.
+    println!("cargo::rustc-check-cfg=cfg(bat_assets)");
+    let native = std::env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch != "wasm32");
+    if native && std::env::var_os("CARGO_FEATURE_BAT").is_some() {
+        println!("cargo::rustc-cfg=bat_assets");
+    }
 }
 
 fn convert_theme(src: &str, dump_name: &str) {

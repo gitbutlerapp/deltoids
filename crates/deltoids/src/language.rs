@@ -181,6 +181,7 @@ impl Language {
         detect_syntax_by_path(syntax_set, path)
             .or_else(|| detect_syntax_by_first_line(syntax_set, source))
             .and_then(Self::from_syntax)
+            .filter(|language| language.tree_sitter_config().is_some())
     }
 
     /// Detect the syntect syntax name (the highlight key), independent of
@@ -192,10 +193,12 @@ impl Language {
             .map(|syntax| syntax.name.clone())
     }
 
-    /// Tree-sitter parser and scope taxonomy for this language.
+    /// Tree-sitter parser and scope taxonomy for this language, or nothing when
+    /// its grammar's feature is off.
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn tree_sitter_config(self) -> TreeSitterConfig {
-        match self {
+    pub(crate) fn tree_sitter_config(self) -> Option<TreeSitterConfig> {
+        Some(match self {
+            #[cfg(feature = "lang-rust")]
             Language::Rust => TreeSitterConfig {
                 language: tree_sitter_rust::LANGUAGE,
                 structure_kinds: &[
@@ -215,6 +218,7 @@ impl Language {
                 leading_comment_kinds: &["line_comment", "block_comment", "attribute_item"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-python")]
             Language::Python => TreeSitterConfig {
                 language: tree_sitter_python::LANGUAGE,
                 structure_kinds: &["function_definition", "class_definition"],
@@ -227,6 +231,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-javascript")]
             Language::JavaScript => TreeSitterConfig {
                 language: tree_sitter_javascript::LANGUAGE,
                 structure_kinds: &[
@@ -270,6 +275,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-typescript")]
             Language::TypeScript => TreeSitterConfig {
                 language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
                 structure_kinds: &[
@@ -303,6 +309,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-typescript")]
             Language::Tsx => TreeSitterConfig {
                 language: tree_sitter_typescript::LANGUAGE_TSX,
                 structure_kinds: &[
@@ -334,6 +341,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-go")]
             Language::Go => TreeSitterConfig {
                 language: tree_sitter_go::LANGUAGE,
                 structure_kinds: &[
@@ -358,6 +366,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-ruby")]
             Language::Ruby => TreeSitterConfig {
                 language: tree_sitter_ruby::LANGUAGE,
                 structure_kinds: &["method", "singleton_method", "class", "module"],
@@ -374,6 +383,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-kotlin")]
             Language::Kotlin => TreeSitterConfig {
                 language: tree_sitter_kotlin_ng::LANGUAGE,
                 structure_kinds: &[
@@ -390,6 +400,7 @@ impl Language {
                 leading_comment_kinds: &["line_comment", "block_comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-java")]
             Language::Java => TreeSitterConfig {
                 language: tree_sitter_java::LANGUAGE,
                 structure_kinds: &[
@@ -411,6 +422,7 @@ impl Language {
                 leading_comment_kinds: &["line_comment", "block_comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-c")]
             Language::C => TreeSitterConfig {
                 language: tree_sitter_c::LANGUAGE,
                 structure_kinds: &["function_definition", "struct_specifier"],
@@ -423,6 +435,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-cpp")]
             Language::Cpp => TreeSitterConfig {
                 language: tree_sitter_cpp::LANGUAGE,
                 structure_kinds: &[
@@ -439,6 +452,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-bash")]
             Language::Bash => TreeSitterConfig {
                 language: tree_sitter_bash::LANGUAGE,
                 structure_kinds: &["function_definition"],
@@ -451,6 +465,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-lua")]
             Language::Lua => TreeSitterConfig {
                 language: tree_sitter_lua::LANGUAGE,
                 structure_kinds: &["function_declaration"],
@@ -468,6 +483,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-css")]
             Language::Css => TreeSitterConfig {
                 language: tree_sitter_css::LANGUAGE,
                 structure_kinds: &["rule_set", "media_statement"],
@@ -480,6 +496,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-hcl")]
             Language::Hcl => TreeSitterConfig {
                 language: tree_sitter_hcl::LANGUAGE,
                 structure_kinds: &["block"],
@@ -497,6 +514,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-markdown")]
             Language::Markdown => TreeSitterConfig {
                 language: tree_sitter_md::LANGUAGE,
                 structure_kinds: &["atx_heading", "setext_heading"],
@@ -515,6 +533,7 @@ impl Language {
                 // section model is future work.
                 transparent_expansion: false,
             },
+            #[cfg(feature = "lang-sql")]
             Language::Sql => TreeSitterConfig {
                 language: tree_sitter_sequel::LANGUAGE,
                 // DDL statements are the named units of a schema. Each
@@ -556,6 +575,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-toml")]
             Language::Toml => TreeSitterConfig {
                 language: tree_sitter_toml_ng::LANGUAGE,
                 structure_kinds: &["table", "table_array_element"],
@@ -568,6 +588,7 @@ impl Language {
                 leading_comment_kinds: &["comment"],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-json")]
             Language::Json => TreeSitterConfig {
                 language: tree_sitter_json::LANGUAGE,
                 structure_kinds: &[],
@@ -580,6 +601,7 @@ impl Language {
                 leading_comment_kinds: &[],
                 transparent_expansion: true,
             },
+            #[cfg(feature = "lang-yaml")]
             Language::Yaml => TreeSitterConfig {
                 language: tree_sitter_yaml::LANGUAGE,
                 structure_kinds: &[],
@@ -592,7 +614,9 @@ impl Language {
                 leading_comment_kinds: &[],
                 transparent_expansion: true,
             },
-        }
+            #[allow(unreachable_patterns)]
+            _ => return None,
+        })
     }
 
     fn from_syntax(syntax: &SyntaxReference) -> Option<Self> {

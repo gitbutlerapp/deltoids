@@ -12,7 +12,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(bat_assets)]
 use bat::assets::HighlightingAssets;
 #[cfg(not(target_arch = "wasm32"))]
 use serde::Deserialize;
@@ -245,7 +245,7 @@ impl SyntaxAssets {
     /// Uses `BAT_THEME` if set. Otherwise uses `[theme] mode` (or terminal
     /// detection when mode is `auto`) to choose appropriate defaults: Monokai
     /// Extended for dark, GitHub for light.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(bat_assets)]
     pub fn load() -> Self {
         let syntax_set = SYNTAX_SET.get_or_init(bundled_syntax_set);
 
@@ -261,9 +261,10 @@ impl SyntaxAssets {
         }
     }
 
-    /// Load syntax assets on wasm from two-face's embedded syntect dumps (the
-    /// same syntaxes/themes bat ships), avoiding the filesystem and oniguruma.
-    #[cfg(target_arch = "wasm32")]
+    /// Load syntax assets from two-face's embedded syntect dumps (the same
+    /// syntaxes/themes bat ships), on wasm and without the `bat` feature,
+    /// avoiding the filesystem.
+    #[cfg(not(bat_assets))]
     pub fn load() -> Self {
         let syntax_set = SYNTAX_SET.get_or_init(bundled_syntax_set);
 
@@ -323,7 +324,7 @@ fn theme_registry() -> &'static ThemeRegistry {
 fn build_theme_registry() -> ThemeRegistry {
     let mut themes: HashMap<&'static str, SyntectTheme> = HashMap::new();
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(bat_assets)]
     {
         let assets = load_highlighting_assets();
         for name in assets.themes() {
@@ -332,7 +333,7 @@ fn build_theme_registry() -> ThemeRegistry {
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(not(bat_assets))]
     {
         let set = two_face::theme::extra();
         for name in two_face::theme::EmbeddedLazyThemeSet::theme_names() {
@@ -392,9 +393,9 @@ pub fn theme_name_key(name: &str) -> &'static str {
 }
 
 /// The bundled syntax set used for both highlighting and stable language
-/// detection. Native builds read bat's embedded assets; wasm builds use
-/// two-face's embedded syntect dumps.
-#[cfg(not(target_arch = "wasm32"))]
+/// detection. With the `bat` feature, native builds read bat's assets;
+/// otherwise two-face's embedded syntect dumps.
+#[cfg(bat_assets)]
 pub(crate) fn bundled_syntax_set() -> SyntaxSet {
     load_highlighting_assets()
         .get_syntax_set()
@@ -402,12 +403,12 @@ pub(crate) fn bundled_syntax_set() -> SyntaxSet {
         .clone()
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(not(bat_assets))]
 pub(crate) fn bundled_syntax_set() -> SyntaxSet {
     two_face::syntax::extra_newlines()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(bat_assets)]
 fn load_highlighting_assets() -> HighlightingAssets {
     let cache_dir = bat_cache_dir().map(|d| d.join("bat"));
     cache_dir
@@ -418,7 +419,7 @@ fn load_highlighting_assets() -> HighlightingAssets {
 /// Get the cache directory following bat/delta conventions.
 /// On macOS, follows XDG spec (XDG_CACHE_HOME or ~/.cache) rather than native paths.
 /// On other platforms, uses the native cache directory.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(bat_assets)]
 fn bat_cache_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -434,7 +435,7 @@ fn bat_cache_dir() -> Option<PathBuf> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(bat_assets)]
 fn resolve_syntax_theme_name(assets: &HighlightingAssets) -> String {
     // 1. Check BAT_THEME
     if let Ok(theme) = env::var("BAT_THEME")

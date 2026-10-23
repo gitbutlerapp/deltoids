@@ -37,7 +37,7 @@ impl ParsedFile {
     }
 
     pub(crate) fn parse_as(language: Language, source: &str) -> Option<Self> {
-        let config = language.tree_sitter_config();
+        let config = language.tree_sitter_config()?;
         let mut parser = Parser::new();
         parser.set_language(&config.language.into()).ok()?;
         let tree = parser.parse(source, None)?;
