@@ -30,6 +30,10 @@ The symbol under the cursor is underlined.
 | Double-click a symbol | Go to its definition |
 | Right-click a symbol | List its callers |
 
+The callers of a method that implements a trait include the calls made
+through the trait, such as calls in generic code. Calls that go to
+another implementation are left out.
+
 ## Server state
 
 The top border of the diff pane names the file under the cursor. At the

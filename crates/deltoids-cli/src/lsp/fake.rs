@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use lsp_server::{Connection, Message, Request, RequestId, Response};
+use lsp_server::{Connection, ErrorCode, Message, Request, RequestId, Response};
 use serde_json::{Value, json};
 
 use super::Lsp;
@@ -23,6 +23,8 @@ pub(crate) enum Reply {
     /// Send these messages, then answer the request with the result, if
     /// any.
     Then(Vec<Message>, Option<Value>),
+    /// Answer the request with this error message.
+    Error(String),
     /// Say nothing.
     Silent,
     /// Close the connection, as a crashing server would.
@@ -173,6 +175,15 @@ fn serve(
                 None => {}
             },
             Reply::Result(result) => respond(result),
+            Reply::Error(message) => {
+                if let Some(Request { id, .. }) = &request {
+                    let _ = server.sender.send(Message::Response(Response::new_err(
+                        id.clone(),
+                        ErrorCode::ContentModified as i32,
+                        message,
+                    )));
+                }
+            }
             Reply::Then(messages, result) => {
                 for message in messages {
                     let _ = server.sender.send(message);

@@ -187,6 +187,183 @@ fn callers_fall_back_to_references_without_a_call_hierarchy() {
     assert_eq!(params[0]["context"]["includeDeclaration"], json!(false));
 }
 
+fn with_declarations() -> Value {
+    json!({
+        "positionEncoding": "utf-8",
+        "callHierarchyProvider": true,
+        "declarationProvider": true
+    })
+}
+
+fn range(line: u32) -> Value {
+    json!({ "start": { "line": line, "character": 7 }, "end": { "line": line, "character": 12 } })
+}
+
+/// A call hierarchy item for `total` declared on 0-based `line` of
+/// `src/cart.rs`.
+fn total_item(name: &str, line: u32) -> Value {
+    json!({
+        "name": name, "kind": 6, "uri": uri("src/cart.rs"),
+        "range": range(line), "selectionRange": range(line)
+    })
+}
+
+const IMPL_LINE: u32 = 9;
+const TRAIT_LINE: u32 = 2;
+const OTHER_IMPL_LINE: u32 = 15;
+
+/// A server where `total` at the cursor is an impl method on
+/// `IMPL_LINE` of its trait's method on `TRAIT_LINE`, and the
+/// declaration of the cursor is on `declared`. The trait method has four
+/// callers in `src/report.rs`, whose calls go to: the impl (`direct`,
+/// line 10), the trait (`shell`, line 20), another impl (`mock`, line
+/// 30), and the trait (`dynamic`, line 40). The impl alone has
+/// `direct`. With `silent`, no `definition` answers.
+fn trait_server(declared: u32, silent: bool) -> fake::Script {
+    let call = |name: &str, line: u32| {
+        json!({
+            "from": { "name": name, "kind": 12, "uri": uri("src/report.rs"),
+                      "range": range(line), "selectionRange": range(line) },
+            "fromRanges": [{ "start": { "line": line, "character": 4 },
+                             "end": { "line": line, "character": 9 } }]
+        })
+    };
+    let trait_calls = json!([
+        call("direct", 10),
+        call("shell", 20),
+        call("mock", 30),
+        call("dynamic", 40)
+    ]);
+    let impl_calls = json!([call("direct", 10)]);
+    Arc::new(move |message| {
+        let Message::Request(r) = message else {
+            return Reply::Default;
+        };
+        let line = r.params["position"]["line"].as_u64();
+        match r.method.as_str() {
+            "textDocument/declaration" => {
+                Reply::Result(json!([{ "uri": uri("src/cart.rs"), "range": range(declared) }]))
+            }
+            "textDocument/prepareCallHierarchy" if line == Some(TRAIT_LINE.into()) => {
+                Reply::Result(json!([total_item("trait", TRAIT_LINE)]))
+            }
+            "textDocument/prepareCallHierarchy" => {
+                Reply::Result(json!([total_item("impl", IMPL_LINE)]))
+            }
+            "callHierarchy/incomingCalls" if r.params["item"]["name"] == "trait" => {
+                Reply::Result(trait_calls.clone())
+            }
+            "callHierarchy/incomingCalls" => Reply::Result(impl_calls.clone()),
+            "textDocument/definition" if silent => Reply::Silent,
+            "textDocument/definition" => {
+                let target = match line {
+                    Some(10) => IMPL_LINE,
+                    Some(30) => OTHER_IMPL_LINE,
+                    _ => TRAIT_LINE,
+                };
+                Reply::Result(json!({ "uri": uri("src/cart.rs"), "range": range(target) }))
+            }
+            _ => Reply::Default,
+        }
+    })
+}
+
+fn definition_lines(record: &fake::Record) -> Vec<u64> {
+    record
+        .params("textDocument/definition")
+        .iter()
+        .filter_map(|params| params["position"]["line"].as_u64())
+        .collect()
+}
+
+#[test]
+fn callers_of_an_impl_method_include_calls_through_its_trait() {
+    let (lsp, record) = fake::lsp(
+        Path::new(ROOT),
+        with_declarations(),
+        trait_server(TRAIT_LINE, false),
+    );
+    let ticket = lsp.ask(Query::Callers, total(MAIN)).unwrap();
+    assert_eq!(
+        wait(&lsp, &ticket),
+        Ok(vec![
+            found("src/report.rs", 11, Some("direct")),
+            found("src/report.rs", 21, Some("shell")),
+            found("src/report.rs", 41, Some("dynamic")),
+        ])
+    );
+    assert_eq!(definition_lines(&record), vec![10, 20, 30, 40]);
+}
+
+#[test]
+fn a_declaration_where_the_function_is_keeps_its_own_callers() {
+    let (lsp, record) = fake::lsp(
+        Path::new(ROOT),
+        with_declarations(),
+        trait_server(IMPL_LINE, false),
+    );
+    let ticket = lsp.ask(Query::Callers, total(MAIN)).unwrap();
+    assert_eq!(
+        wait(&lsp, &ticket),
+        Ok(vec![found("src/report.rs", 11, Some("direct"))])
+    );
+    assert!(definition_lines(&record).is_empty());
+}
+
+#[test]
+fn without_declarations_callers_skip_the_trait() {
+    let (lsp, record) = fake::lsp(Path::new(ROOT), utf8(), trait_server(TRAIT_LINE, false));
+    let ticket = lsp.ask(Query::Callers, total(MAIN)).unwrap();
+    assert_eq!(
+        wait(&lsp, &ticket),
+        Ok(vec![found("src/report.rs", 11, Some("direct"))])
+    );
+    assert!(record.params("textDocument/declaration").is_empty());
+}
+
+#[test]
+fn a_call_whose_definition_fails_stays_a_caller() {
+    let script = trait_server(TRAIT_LINE, false);
+    let failing: fake::Script = Arc::new(move |message| match message {
+        Message::Request(r)
+            if r.method == "textDocument/definition" && r.params["position"]["line"] == 30 =>
+        {
+            Reply::Error("content modified".to_string())
+        }
+        _ => script(message),
+    });
+    let (lsp, _) = fake::lsp(Path::new(ROOT), with_declarations(), failing);
+    let ticket = lsp.ask(Query::Callers, total(MAIN)).unwrap();
+    assert_eq!(
+        wait(&lsp, &ticket),
+        Ok(vec![
+            found("src/report.rs", 11, Some("direct")),
+            found("src/report.rs", 21, Some("shell")),
+            found("src/report.rs", 31, Some("mock")),
+            found("src/report.rs", 41, Some("dynamic")),
+        ])
+    );
+}
+
+#[test]
+fn a_cancelled_trait_lookup_never_answers() {
+    let (lsp, record) = fake::lsp(
+        Path::new(ROOT),
+        with_declarations(),
+        trait_server(TRAIT_LINE, true),
+    );
+    let ticket = lsp.ask(Query::Callers, total(MAIN)).unwrap();
+    assert!(eventually(|| {
+        lsp.state(Language::Rust);
+        definition_lines(&record).len() == 4
+    }));
+    let probe = Ticket(ticket.0);
+    lsp.cancel(ticket);
+    assert!(eventually(|| record.params("$/cancelRequest").len() == 4));
+    thread::sleep(Duration::from_millis(30));
+    assert_eq!(lsp.answer(&probe), None);
+}
+
 #[test]
 fn a_utf16_server_gets_columns_in_utf16_units() {
     let (lsp, record) = fake::lsp(
@@ -898,4 +1075,85 @@ fn rust_analyzer_finds_a_definition_in_another_file() {
         &dir.path().join("src/cart.rs"),
     ));
     ask_until(vec![found("src/cart.rs", 3, None)]);
+}
+
+const MODES: &str = "\
+trait Mode {
+    fn reload(&mut self);
+}
+
+struct Workspace;
+struct Mock;
+
+impl Mode for Workspace {
+    fn reload(&mut self) {}
+}
+
+impl Mode for Mock {
+    fn reload(&mut self) {}
+}
+
+fn shell(mode: &mut impl Mode) {
+    mode.reload();
+}
+
+fn direct(w: &mut Workspace) {
+    w.reload();
+}
+
+fn mock(m: &mut Mock) {
+    m.reload();
+}
+
+fn dynamic(d: &mut dyn Mode) {
+    d.reload();
+}
+
+fn main() {
+    shell(&mut Workspace);
+    direct(&mut Workspace);
+    mock(&mut Mock);
+    dynamic(&mut Mock);
+}
+";
+
+#[test]
+#[ignore = "needs rust-analyzer (on PATH, or its path in RUST_ANALYZER); run with --ignored"]
+fn rust_analyzer_lists_calls_through_the_trait_as_callers_of_an_impl() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"modes\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("src/main.rs"), MODES).unwrap();
+    let program = std::env::var("RUST_ANALYZER").unwrap_or("rust-analyzer".to_string());
+    let table = ServerTable::parse(&format!("[lsp.rust]\ncommand = [{program:?}]\n"));
+    let lsp = Lsp::with_launcher(dir.path(), table, Box::new(super::transport::spawn));
+    let expected = vec![
+        found("src/main.rs", 17, Some("shell")),
+        found("src/main.rs", 21, Some("direct")),
+        found("src/main.rs", 29, Some("dynamic")),
+    ];
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let mut last = Err(String::new());
+    while std::time::Instant::now() < deadline {
+        let workspace_reload = symbol(Language::Rust, "src/main.rs", MODES, 9, "reload");
+        let ticket = lsp.ask(Query::Callers, workspace_reload).unwrap();
+        last = loop {
+            if let Some(answer) = lsp.answer(&ticket) {
+                break answer;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        if let Ok(callers) = &mut last {
+            callers.sort_by_key(|caller| caller.line);
+        }
+        if last.as_ref() == Ok(&expected) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    assert_eq!(last, Ok(expected));
 }

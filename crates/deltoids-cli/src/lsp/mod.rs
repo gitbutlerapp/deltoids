@@ -5,8 +5,9 @@
 //! answers. Everything protocol-shaped stays inside: starting servers
 //! (lazily, one per distinct command), the handshake, position encodings,
 //! file URIs, keeping open documents in step with the text the caller
-//! shows, the call-hierarchy-or-references choice, replies to the
-//! server's own requests, progress, crashes, and shutdown.
+//! shows, the call-hierarchy-or-references choice, widening the callers
+//! of a trait impl method to the calls that reach it through the trait,
+//! replies to the server's own requests, progress, crashes, and shutdown.
 //!
 //! deltoids watches files for its servers: the workdir watcher feeds
 //! [`Lsp::file_events`], and each server hears about the files it

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::TryRecvError;
 use lsp_server::{ErrorCode, Message, Notification, Request, RequestId, Response};
-use lsp_types::{CallHierarchyIncomingCall, GotoDefinitionResponse, Location};
+use lsp_types::{CallHierarchyIncomingCall, GotoDefinitionResponse, Location, Position};
 use serde_json::{Value, json};
 
 use super::config::{ServerSettings, ServerSpec};
@@ -21,6 +21,7 @@ use super::{Phase, Query};
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 /// A result location, before its path is made relative to the workdir.
+#[derive(Clone)]
 pub(super) struct Hit {
     pub(super) path: PathBuf,
     pub(super) line: usize,
@@ -53,15 +54,63 @@ enum Stage {
     Prepare,
     Incoming,
     References,
+    /// Where the function at the cursor is declared: its trait's method,
+    /// when it implements one.
+    Declared,
+    /// The call hierarchy item at the cursor, beside [`Stage::Declared`].
+    Own,
+    /// The call hierarchy item of the trait's method.
+    TraitPrepare,
+    /// The calls to the trait's method.
+    TraitIncoming,
+    /// Where candidate call `n` goes.
+    Target(usize),
 }
 
 impl Stage {
     fn looked_for(self) -> &'static str {
         match self {
             Stage::Definition => "definition",
-            Stage::Prepare | Stage::Incoming | Stage::References => "callers",
+            _ => "callers",
         }
     }
+}
+
+/// A file and 1-based line, to tell whether two locations are one place.
+type Place = (PathBuf, usize);
+
+/// A location the server gave, to ask about again.
+struct Spot {
+    uri: String,
+    position: Position,
+    place: Place,
+}
+
+/// A call to the trait's method, until its target is known.
+struct Candidate {
+    hit: Hit,
+    spot: Spot,
+    kept: bool,
+}
+
+/// A callers query that may widen from an impl method to its trait's
+/// method: calls through the trait, as in generic code, reach the impl
+/// too. Calls that go to another impl are sifted out.
+enum Widening {
+    /// Waiting for the declaration and the item at the cursor; `None`
+    /// until each answers.
+    Joining {
+        declared: Option<Option<Spot>>,
+        own: Option<Option<Value>>,
+    },
+    /// Asking for the trait's callers; calls going to `keep` stay.
+    Tracing { keep: [Place; 2] },
+    /// Waiting for where `outstanding` of the calls go.
+    Sifting {
+        keep: [Place; 2],
+        calls: Vec<Candidate>,
+        outstanding: usize,
+    },
 }
 
 struct Waiting {
@@ -90,8 +139,10 @@ pub(super) struct Server {
     initialize: Option<RequestId>,
     encoding: Encoding,
     call_hierarchy: bool,
+    declaration: bool,
     queue: Vec<Outgoing>,
     waiting: HashMap<RequestId, Waiting>,
+    widening: HashMap<u64, Widening>,
     work: Vec<Work>,
     documents: HashMap<String, Document>,
     /// The files the server asked to hear about.
@@ -120,8 +171,10 @@ impl Server {
             initialize: None,
             encoding: Encoding::Utf16,
             call_hierarchy: false,
+            declaration: false,
             queue: Vec::new(),
             waiting: HashMap::new(),
+            widening: HashMap::new(),
             work: Vec::new(),
             documents: HashMap::new(),
             watched: Registrations::default(),
@@ -149,6 +202,7 @@ impl Server {
                 "textDocument": {
                     "synchronization": { "dynamicRegistration": false },
                     "definition": { "linkSupport": true },
+                    "declaration": { "linkSupport": true },
                     "references": {},
                     "callHierarchy": {}
                 }
@@ -267,6 +321,7 @@ impl Server {
             self.waiting.remove(&id);
             self.write(notification("$/cancelRequest", json!({ "id": id })));
         }
+        self.widening.remove(&ticket);
     }
 
     /// What the server is busy with, if anything.
@@ -314,13 +369,16 @@ impl Server {
     }
 
     fn fail_with(&mut self, message: &str, answers: &mut Vec<(u64, Answer)>) {
-        for (_, waiting) in self.waiting.drain() {
-            answers.push((waiting.ticket, Err(message.to_string())));
-        }
-        for outgoing in self.queue.drain(..) {
-            if let Outgoing::Ask(ask) = outgoing {
-                answers.push((ask.ticket, Err(message.to_string())));
-            }
+        let mut tickets: Vec<u64> = self.waiting.drain().map(|(_, w)| w.ticket).collect();
+        tickets.extend(self.queue.drain(..).filter_map(|outgoing| match outgoing {
+            Outgoing::Ask(ask) => Some(ask.ticket),
+            Outgoing::Message(_) => None,
+        }));
+        tickets.sort_unstable();
+        tickets.dedup();
+        self.widening.clear();
+        for ticket in tickets {
+            answers.push((ticket, Err(message.to_string())));
         }
     }
 
@@ -333,12 +391,21 @@ impl Server {
                 let Some(waiting) = self.waiting.remove(&response.id) else {
                     return;
                 };
-                match response.response_result {
-                    Ok(value) => self.answered(waiting, value, answers),
-                    Err(error) => answers.push((
-                        waiting.ticket,
-                        Err(format!("{}: {}", self.name, error.message)),
-                    )),
+                match (response.response_result, waiting.stage) {
+                    (Ok(value), _) => self.answered(waiting, value, answers),
+                    (Err(_), Stage::Declared) => {
+                        self.join(waiting.ticket, Some(None), None, answers);
+                    }
+                    (Err(_), Stage::Target(index)) => {
+                        self.targeted(waiting.ticket, index, true, answers);
+                    }
+                    (Err(error), _) => {
+                        self.forget(waiting.ticket);
+                        answers.push((
+                            waiting.ticket,
+                            Err(format!("{}: {}", self.name, error.message)),
+                        ));
+                    }
                 }
             }
             Message::Request(request) => self.reply(request),
@@ -364,6 +431,10 @@ impl Server {
             capabilities["callHierarchyProvider"],
             Value::Bool(true) | Value::Object(_)
         );
+        self.declaration = matches!(
+            capabilities["declarationProvider"],
+            Value::Bool(true) | Value::Object(_)
+        );
         self.write(notification("initialized", json!({})));
         for outgoing in std::mem::take(&mut self.queue) {
             self.dispatch(outgoing);
@@ -371,7 +442,40 @@ impl Server {
     }
 
     fn answered(&mut self, waiting: Waiting, value: Value, answers: &mut Vec<(u64, Answer)>) {
+        let ticket = waiting.ticket;
         let hits = match waiting.stage {
+            Stage::Declared => {
+                return self.join(ticket, Some(first_spot(value)), None, answers);
+            }
+            Stage::Own => {
+                let own = value.as_array().and_then(|items| items.first()).cloned();
+                return self.join(ticket, None, Some(own), answers);
+            }
+            Stage::TraitPrepare => match value.as_array().and_then(|items| items.first()) {
+                Some(item) => {
+                    let params = json!({ "item": item });
+                    self.call(
+                        ticket,
+                        "callHierarchy/incomingCalls",
+                        params,
+                        Stage::TraitIncoming,
+                    );
+                    return;
+                }
+                None => Vec::new(),
+            },
+            Stage::TraitIncoming => {
+                let calls = incoming_candidates(value);
+                if !calls.is_empty() {
+                    return self.sift(ticket, calls);
+                }
+                Vec::new()
+            }
+            Stage::Target(index) => {
+                let targets = definition_hits(value);
+                let kept = targets.is_empty() || self.goes_to_kept(ticket, &targets);
+                return self.targeted(ticket, index, kept, answers);
+            }
             Stage::Definition => definition_hits(value),
             Stage::Prepare => match value.as_array().and_then(|items| items.first()) {
                 Some(item) => {
@@ -386,7 +490,10 @@ impl Server {
                 }
                 None => Vec::new(),
             },
-            Stage::Incoming => incoming_hits(value),
+            Stage::Incoming => incoming_candidates(value)
+                .into_iter()
+                .map(|call| call.hit)
+                .collect(),
             Stage::References => serde_json::from_value::<Option<Vec<Location>>>(value)
                 .ok()
                 .flatten()
@@ -395,17 +502,169 @@ impl Server {
                 .filter_map(|location| location_hit(location, None))
                 .collect(),
         };
+        self.finish(ticket, waiting.stage, hits, answers);
+    }
+
+    /// Answer `ticket` with `hits`, or say none were found.
+    fn finish(
+        &mut self,
+        ticket: u64,
+        stage: Stage,
+        hits: Vec<Hit>,
+        answers: &mut Vec<(u64, Answer)>,
+    ) {
+        self.forget(ticket);
         let answer = if hits.is_empty() {
             let indexing = if self.work.is_empty() {
                 String::new()
             } else {
                 format!("; {} is still indexing", self.name)
             };
-            Err(format!("No {} found{indexing}", waiting.stage.looked_for()))
+            Err(format!("No {} found{indexing}", stage.looked_for()))
         } else {
             Ok(dedup(hits))
         };
-        answers.push((waiting.ticket, answer));
+        answers.push((ticket, answer));
+    }
+
+    /// Drop what `ticket` still waits for.
+    fn forget(&mut self, ticket: u64) {
+        self.waiting.retain(|_, waiting| waiting.ticket != ticket);
+        self.widening.remove(&ticket);
+    }
+
+    /// Take the declaration or the item at the cursor. With both, go
+    /// through the trait's method when the declaration lies elsewhere,
+    /// or ask for the item's own callers.
+    fn join(
+        &mut self,
+        ticket: u64,
+        declared: Option<Option<Spot>>,
+        own: Option<Option<Value>>,
+        answers: &mut Vec<(u64, Answer)>,
+    ) {
+        let Some(Widening::Joining {
+            declared: has_declared,
+            own: has_own,
+        }) = self.widening.get_mut(&ticket)
+        else {
+            return;
+        };
+        if declared.is_some() {
+            *has_declared = declared;
+        }
+        if own.is_some() {
+            *has_own = own;
+        }
+        if has_declared.is_none() || has_own.is_none() {
+            return;
+        }
+        let Some(Widening::Joining {
+            declared: Some(declared),
+            own: Some(own),
+        }) = self.widening.remove(&ticket)
+        else {
+            return;
+        };
+        let Some(own) = own else {
+            return self.finish(ticket, Stage::Own, Vec::new(), answers);
+        };
+        match (item_place(&own), declared) {
+            (Some(own_place), Some(spot)) if own_place != spot.place => {
+                let keep = [own_place, spot.place];
+                self.widening.insert(ticket, Widening::Tracing { keep });
+                let params = json!({
+                    "textDocument": { "uri": spot.uri },
+                    "position": spot.position
+                });
+                self.call(
+                    ticket,
+                    "textDocument/prepareCallHierarchy",
+                    params,
+                    Stage::TraitPrepare,
+                );
+            }
+            _ => {
+                let params = json!({ "item": own });
+                self.call(
+                    ticket,
+                    "callHierarchy/incomingCalls",
+                    params,
+                    Stage::Incoming,
+                );
+            }
+        }
+    }
+
+    /// Ask where each call to the trait's method goes.
+    fn sift(&mut self, ticket: u64, calls: Vec<Candidate>) {
+        let Some(Widening::Tracing { keep }) = self.widening.remove(&ticket) else {
+            return;
+        };
+        for (index, call) in calls.iter().enumerate() {
+            let params = json!({
+                "textDocument": { "uri": call.spot.uri },
+                "position": call.spot.position
+            });
+            self.call(
+                ticket,
+                "textDocument/definition",
+                params,
+                Stage::Target(index),
+            );
+        }
+        let outstanding = calls.len();
+        self.widening.insert(
+            ticket,
+            Widening::Sifting {
+                keep,
+                calls,
+                outstanding,
+            },
+        );
+    }
+
+    /// Whether any of `targets` is the impl or the trait's method.
+    fn goes_to_kept(&self, ticket: u64, targets: &[Hit]) -> bool {
+        let Some(Widening::Sifting { keep, .. }) = self.widening.get(&ticket) else {
+            return false;
+        };
+        targets.iter().any(|target| {
+            keep.iter()
+                .any(|(path, line)| *path == target.path && *line == target.line)
+        })
+    }
+
+    /// Record whether call `index` stays; answer once every call is in.
+    fn targeted(
+        &mut self,
+        ticket: u64,
+        index: usize,
+        kept: bool,
+        answers: &mut Vec<(u64, Answer)>,
+    ) {
+        let Some(Widening::Sifting {
+            calls, outstanding, ..
+        }) = self.widening.get_mut(&ticket)
+        else {
+            return;
+        };
+        if let Some(call) = calls.get_mut(index) {
+            call.kept = kept;
+        }
+        *outstanding = outstanding.saturating_sub(1);
+        if *outstanding > 0 {
+            return;
+        }
+        let Some(Widening::Sifting { calls, .. }) = self.widening.remove(&ticket) else {
+            return;
+        };
+        let hits = calls
+            .into_iter()
+            .filter(|call| call.kept)
+            .map(|call| call.hit)
+            .collect();
+        self.finish(ticket, Stage::TraitIncoming, hits, answers);
     }
 
     fn reply(&mut self, request: Request) {
@@ -512,6 +771,28 @@ impl Server {
             "textDocument": { "uri": ask.uri },
             "position": { "line": ask.line, "character": character }
         });
+        if ask.query == Query::Callers && self.call_hierarchy && self.declaration {
+            self.widening.insert(
+                ask.ticket,
+                Widening::Joining {
+                    declared: None,
+                    own: None,
+                },
+            );
+            self.call(
+                ask.ticket,
+                "textDocument/declaration",
+                params.clone(),
+                Stage::Declared,
+            );
+            self.call(
+                ask.ticket,
+                "textDocument/prepareCallHierarchy",
+                params,
+                Stage::Own,
+            );
+            return;
+        }
         let (method, stage) = match ask.query {
             Query::Definition => ("textDocument/definition", Stage::Definition),
             Query::Callers if self.call_hierarchy => {
@@ -598,7 +879,8 @@ fn definition_hits(value: Value) -> Vec<Hit> {
     }
 }
 
-fn incoming_hits(value: Value) -> Vec<Hit> {
+/// Each call site, with where to ask about it again.
+fn incoming_candidates(value: Value) -> Vec<Candidate> {
     serde_json::from_value::<Option<Vec<CallHierarchyIncomingCall>>>(value)
         .ok()
         .flatten()
@@ -606,14 +888,52 @@ fn incoming_hits(value: Value) -> Vec<Hit> {
         .iter()
         .flat_map(|call| {
             call.from_ranges.iter().filter_map(|range| {
-                hit(
+                let hit = hit(
                     call.from.uri.as_str(),
                     range.start.line,
                     Some(call.from.name.clone()),
-                )
+                )?;
+                let spot = spot(call.from.uri.as_str(), range.start)?;
+                Some(Candidate {
+                    hit,
+                    spot,
+                    kept: false,
+                })
             })
         })
         .collect()
+}
+
+/// The first location of a definition-shaped answer.
+fn first_spot(value: Value) -> Option<Spot> {
+    match serde_json::from_value::<Option<GotoDefinitionResponse>>(value).ok()?? {
+        GotoDefinitionResponse::Scalar(location) => {
+            spot(location.uri.as_str(), location.range.start)
+        }
+        GotoDefinitionResponse::Array(locations) => {
+            let location = locations.first()?;
+            spot(location.uri.as_str(), location.range.start)
+        }
+        GotoDefinitionResponse::Link(links) => {
+            let link = links.first()?;
+            spot(link.target_uri.as_str(), link.target_selection_range.start)
+        }
+    }
+}
+
+fn spot(uri: &str, position: Position) -> Option<Spot> {
+    Some(Spot {
+        uri: uri.to_string(),
+        position,
+        place: (position::path(uri)?, position.line as usize + 1),
+    })
+}
+
+/// Where a call hierarchy item's name is.
+fn item_place(item: &Value) -> Option<Place> {
+    let path = position::path(item["uri"].as_str()?)?;
+    let line = item["selectionRange"]["start"]["line"].as_u64()?;
+    Some((path, line as usize + 1))
 }
 
 fn location_hit(location: &Location, caller: Option<String>) -> Option<Hit> {
